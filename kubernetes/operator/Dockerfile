@@ -1,5 +1,8 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+# Must be >= the `go` directive in go.mod (1.26.0, which controller-runtime
+# v0.24 requires). An older toolchain here fails the image build outright with
+# "go.mod requires go >= 1.26.0".
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 WORKDIR /workspace
 
