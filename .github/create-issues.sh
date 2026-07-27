@@ -645,6 +645,127 @@ Those were raised explicitly, which Go's minimal version selection permits.
 `govulncheck` now reports: **No vulnerabilities found.**
 BODY
 
+# ── Ceph on real disks (b171857) ────────────────────────────────────────────
+
+issue closed "bug,compose,found-by-testing" \
+  "Proxmox cannot use a block device mapped under a custom name" \
+  "Fixed in b171857." <<'BODY'
+## Symptom
+
+```
+# pveceph osd create /dev/ceph-osd-0
+unable to get device info for '/dev/ceph-osd-0'
+```
+
+The device node exists and is a valid block device:
+
+```
+$ ls -l /dev/ceph-osd-0     -> brw-rw---- 8, 0
+$ lsblk /dev/ceph-osd-0     -> resolves to sda
+```
+
+## Root cause
+
+`docker --device /dev/disk/by-id/scsi-XXX:/dev/ceph-osd-0` creates a device
+**node** at the container path, but sysfs belongs to the host and still only
+knows the disk by its kernel name:
+
+```
+$ ls /sys/block/    -> sda sdb sdc sdd      (no ceph-osd-0)
+```
+
+`PVE::Diskmanage` resolves disks through `/sys/block/<name>`, so it rejects any
+path whose basename is not a kernel device name.
+
+## Fix
+
+`scripts/ceph-osd-create.sh` derives the kernel name from the device major:minor
+via `/sys/dev/block/<maj>:<min>/uevent`, recreates the node under that name, and
+passes it to pveceph. Host-side selection stays on stable
+`/dev/disk/by-id/...` paths.
+
+The script also refuses any device that is mounted or has mounted partitions —
+`pveceph osd create` destroys its target with no confirmation.
+BODY
+
+issue closed "bug,compose,found-by-testing" \
+  "ceph-volume fails without the udev database: No udev data could be retrieved" \
+  "Fixed in b171857." <<'BODY'
+## Symptom
+
+```
+Running command: ceph-volume lvm create --data /dev/sda
+-->  RuntimeError: No udev data could be retrieved for /sys/block/sda
+command 'ceph-volume lvm create --data /dev/sda' failed: exit code 1
+```
+
+## Root cause
+
+`ceph-volume` reads device properties from the udev database through pyudev.
+There is no udevd running in the container and no `/run/udev` database, so the
+lookup fails outright.
+
+## Fix
+
+Bind-mount the host database read-only:
+
+```yaml
+volumes:
+  - /run/udev:/run/udev:ro
+```
+
+Read-only is deliberate: the container consumes the host's data and never writes
+to it.
+BODY
+
+issue closed "bug,compose,found-by-testing" \
+  "/var/lib/ceph not persisted: recreating a container destroys all monitors" \
+  "Fixed in b171857." <<'BODY'
+## Symptom
+
+After a `docker compose up -d` that recreated containers, the Ceph cluster
+became unreachable:
+
+```
+monclient(hunting): authenticate timed out after 300
+[errno 110] RADOS timed out (error connecting to the cluster)
+```
+
+`ceph.client.bootstrap-osd.keyring` was also missing, and OSD creation failed
+with `Unable to create a new OSD id`.
+
+## Root cause
+
+`pveceph mon create` writes monitor, manager and OSD state to `/var/lib/ceph`,
+which was on the container filesystem with no volume. Recreating a container
+destroyed every monitor.
+
+This is the same trap as the Corosync authkey in `/etc/corosync` — Ceph state
+looks like it lives in the cluster filesystem, but most of it does not.
+
+## Fix
+
+A named volume per node for `/var/lib/ceph`.
+BODY
+
+issue closed "bug,compose" \
+  "Ceph pools are created in a permanent HEALTH_WARN" \
+  "Fixed in b171857." <<'BODY'
+After `pveceph pool create`, a small cluster sits at HEALTH_WARN indefinitely:
+
+```
+HEALTH_WARN 1 pools have too many placement groups
+[WRN] POOL_TOO_MANY_PGS: Pool ceph-vm has 128 placement groups, should have 32
+```
+
+PVE creates pools with `pg_autoscale_mode=warn` and a default `pg_num` of 128.
+On three OSDs that is far too many, and in `warn` mode Ceph reports the problem
+but will not correct it.
+
+`make ceph-pool` now sets `pg_autoscale_mode on` after creating the pool, and
+the cluster converges to HEALTH_OK.
+BODY
+
 # ── Still open ──────────────────────────────────────────────────────────────
 
 issue open "testing,operator" \
