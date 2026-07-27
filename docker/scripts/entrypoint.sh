@@ -70,6 +70,13 @@ elif [ -n "$(ls -A /etc/pve 2>/dev/null)" ]; then
     rm -rf /etc/pve/* /etc/pve/.[!.]* 2>/dev/null || true
 fi
 
+# ── Guest bridge (vmbr0) ─────────────────────────────────────────────────────
+# Built before systemd so that /etc/network/interfaces is already correct when
+# pvedaemon reads it, and ifupdown never sees the stale build-time file.
+if [ -x /usr/local/bin/setup-bridge ]; then
+    /usr/local/bin/setup-bridge || log "WARNING: guest bridge setup failed; guests cannot be created."
+fi
+
 # ── /dev/fuse (required by pmxcfs) ───────────────────────────────────────────
 if [ ! -c /dev/fuse ]; then
     log "WARNING: /dev/fuse not found. pve-cluster (pmxcfs) will fail to mount /etc/pve."

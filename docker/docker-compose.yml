@@ -21,6 +21,14 @@
 
 # Shared settings applied to every node via the YAML anchor &pve-common.
 x-pve-common: &pve-common
+  # Pin the image name explicitly. Without it Compose derives one per service
+  # (docker-pve1, docker-pve2, ...), so a three-node cluster builds and stores
+  # three identical ~2 GB images — and, worse, they drift: `docker compose build`
+  # on a scaled cluster rebuilds only what the overlay names, leaving pve1-3 on a
+  # stale image. That produced a cluster where nodes 4..N had a newly added
+  # script and nodes 1-3 failed with "executable file not found in $PATH".
+  # One name for every node means one build and no drift.
+  image: multiprox-node:trixie
   build:
     context: .
     dockerfile: Dockerfile
@@ -129,6 +137,10 @@ services:
     networks:
       proxmox-net:
         ipv4_address: 10.10.0.11
+      # Second NIC, bridged into vmbr0 at boot by setup-bridge.sh. See the
+      # guest-net definition at the bottom for why guests get their own network.
+      guest-net:
+        ipv4_address: 10.20.0.11
     ports:
       - "${PVE1_UI_PORT:-8006}:8006"
       - "${PVE1_SSH_PORT:-22201}:22"
@@ -164,6 +176,8 @@ services:
     networks:
       proxmox-net:
         ipv4_address: 10.10.0.12
+      guest-net:
+        ipv4_address: 10.20.0.12
     ports:
       - "${PVE2_UI_PORT:-8007}:8006"
       - "${PVE2_SSH_PORT:-22202}:22"
@@ -201,6 +215,8 @@ services:
     networks:
       proxmox-net:
         ipv4_address: 10.10.0.13
+      guest-net:
+        ipv4_address: 10.20.0.13
     ports:
       - "${PVE3_UI_PORT:-8008}:8006"
       - "${PVE3_SSH_PORT:-22203}:22"
@@ -250,6 +266,31 @@ networks:
           gateway: 10.10.0.1
     driver_opts:
       # Disable Docker's default inter-container isolation on this network
+      com.docker.network.bridge.enable_icc: "true"
+
+  # ── Guest network — the L2 behind vmbr0 ─────────────────────────────────────
+  # Every node gets a second NIC here, and setup-bridge.sh enslaves it to vmbr0
+  # at boot. Guests (LXC/VMs) attach to vmbr0 and therefore all share this one
+  # broadcast domain, which is what a real Proxmox cluster looks like: a guest
+  # keeps its address when it moves between nodes.
+  #
+  # It is a separate network from proxmox-net on purpose. vmbr0 has to enslave
+  # whatever NIC it is built on, and enslaving eth0 would flush the address
+  # carrying Corosync, Ceph, pmxcfs and the web UI — the node would drop out of
+  # the cluster during boot. Splitting management from guest traffic also
+  # mirrors normal practice on bare metal.
+  #
+  # Guests reach the outside world through Docker's own MASQUERADE rule for this
+  # subnet, using 10.20.0.1 as their gateway. No extra NAT is configured in the
+  # containers.
+  guest-net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet:  10.20.0.0/24
+          gateway: 10.20.0.1
+    driver_opts:
       com.docker.network.bridge.enable_icc: "true"
 
 ##############################################################################

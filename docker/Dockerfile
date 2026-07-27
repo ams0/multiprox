@@ -133,6 +133,11 @@ RUN if [ "$ENABLE_CEPH" = "1" ]; then \
            ceph-mon \
            ceph-mgr \
            ceph-osd \
+           # ceph-mds backs CephFS, which is how a Proxmox cluster shares ISOs,
+           # CT templates and snippets — RBD is block-only and cannot be mounted
+           # on several nodes at once, so it cannot serve that role.
+           ceph-mds \
+           ceph-fuse \
            ceph-volume \
            lvm2 \
            gdisk \
@@ -208,10 +213,16 @@ RUN mkdir -p /var/run/sshd \
 # CHANGE THIS before exposing to any network.
 RUN echo 'root:proxmox' | chpasswd
 
-# ── Dummy vmbr0 bridge ────────────────────────────────────────────────────────
-# PVE expects at least one Linux bridge (vmbr0) to attach VMs/containers.
-# In Docker we satisfy this requirement with a pre-configured interfaces file;
-# actual VM networking is handled separately per deployment.
+# ── Network interfaces ────────────────────────────────────────────────────────
+# A placeholder only. The real file is generated at boot by setup-bridge, which
+# is the only thing that knows which interface Docker put on the guest network
+# and what address it was given.
+#
+# What matters here is that this file is SAFE if ifupdown reads it before that
+# happens: it declares nothing but loopback. An earlier version described eth0
+# as DHCP and vmbr0 as a bridge over it, which is what a bare-metal node looks
+# like and exactly wrong here — there is no DHCP server on a Docker network, and
+# enslaving eth0 would cut the node off from the cluster mid-boot.
 COPY config/interfaces /etc/network/interfaces
 
 # ── PVE datacenter defaults ───────────────────────────────────────────────────
@@ -237,11 +248,15 @@ COPY scripts/entrypoint.sh      /usr/local/bin/entrypoint.sh
 COPY scripts/cluster-init.sh    /usr/local/bin/cluster-init
 COPY scripts/cluster-join.sh    /usr/local/bin/cluster-join
 COPY scripts/ceph-osd-create.sh /usr/local/bin/ceph-osd-create
+COPY scripts/setup-bridge.sh    /usr/local/bin/setup-bridge
+COPY scripts/ceph-fs-create.sh  /usr/local/bin/ceph-fs-create
 RUN chmod +x \
         /usr/local/bin/entrypoint.sh \
         /usr/local/bin/cluster-init \
         /usr/local/bin/cluster-join \
-        /usr/local/bin/ceph-osd-create
+        /usr/local/bin/ceph-osd-create \
+        /usr/local/bin/setup-bridge \
+        /usr/local/bin/ceph-fs-create
 
 # ── Persistent volumes ────────────────────────────────────────────────────────
 # /etc/pve        → cluster filesystem (pmxcfs, managed by pve-cluster)
