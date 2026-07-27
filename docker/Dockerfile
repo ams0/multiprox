@@ -17,7 +17,20 @@
 #   Uncomment the QEMU/LXC block below and set ENABLE_KVM=1 in .env
 ############################################################################
 
-FROM debian:bookworm-slim
+# NOT debian:bookworm-slim. The slim variant ships
+#   /etc/dpkg/dpkg.cfg.d/docker  ->  path-exclude /usr/share/doc/*
+# and pve-manager keeps a *data* file there — /usr/share/doc/pve-manager/aplinfo.dat,
+# the appliance-template index. dpkg discards it at unpack, and the postinst then
+# dies on:
+#
+#   cp: cannot stat '/usr/share/doc/pve-manager/aplinfo.dat': No such file or directory
+#   dpkg: error processing package pve-manager (--configure)
+#
+# The whole install aborts. A targeted `path-include` for that one directory would
+# also work, but Proxmox assumes an ordinary Debian across ~350 packages and many
+# postinst scripts, and slim strips man pages and locales too — so the full base is
+# the safer bet. It costs roughly 100 MB on an image that is already ~2 GB.
+FROM debian:bookworm
 
 LABEL org.opencontainers.image.title="multiprox node" \
       org.opencontainers.image.description="Proxmox VE cluster node (containerised)" \
@@ -57,6 +70,25 @@ RUN apt-get install -y --no-install-recommends \
         libpve-http-server-perl \
         pve-firewall \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Disable the enterprise repository ────────────────────────────────────────
+# Installing pve-manager drops in /etc/apt/sources.list.d/pve-enterprise.list:
+#
+#   deb https://enterprise.proxmox.com/debian/pve bookworm pve-enterprise
+#
+# That repo requires a paid subscription, so the NEXT `apt-get update` in this
+# build (the Ceph stage) fails hard:
+#
+#   Err https://enterprise.proxmox.com/debian/pve bookworm InRelease
+#     401  Unauthorized
+#   E: The repository '...' is not signed.
+#
+# We already use the no-subscription repo, so drop any enterprise entry. Matching
+# on content rather than filename covers both the .list and deb822 .sources forms
+# that different Proxmox versions ship.
+RUN grep -rlZ 'enterprise\.proxmox\.com' /etc/apt/sources.list.d/ 2>/dev/null \
+      | xargs -0 -r rm -f \
+    && echo "remaining apt sources:" && ls /etc/apt/sources.list.d/
 
 # ── Optional: QEMU/KVM and LXC (Linux host with /dev/kvm only) ──────────────
 # Uncomment if you have a Linux host and want full VM + container support.
@@ -110,17 +142,24 @@ RUN if [ "$ENABLE_CEPH" = "1" ]; then \
 # sed that rewrites `udev_sync = 1` therefore matches nothing and silently
 # changes nothing — the failure still happens. lvmlocal.conf is read after
 # lvm.conf specifically to hold local overrides, so these values win.
-RUN mkdir -p /etc/lvm && cat > /etc/lvm/lvmlocal.conf <<'LVMCONF'
-# multiprox: allow LVM to operate without udev (containerised PVE node).
-activation {
-    udev_sync = 0
-    udev_rules = 0
-    verify_udev_operations = 0
-}
-devices {
-    obtain_device_list_from_udev = 0
-}
-LVMCONF
+#
+# Written with printf, NOT a heredoc. Dockerfile heredocs require BuildKit; on
+# the legacy builder `cat > file <<'EOF'` silently creates an EMPTY file and the
+# build still succeeds. That produced an image that looked fine and failed at
+# `pveceph osd create` — the worst kind of failure. printf works on both builders.
+RUN mkdir -p /etc/lvm && printf '%s\n' \
+    '# multiprox: allow LVM to operate without udev (containerised PVE node).' \
+    'activation {' \
+    '    udev_sync = 0' \
+    '    udev_rules = 0' \
+    '    verify_udev_operations = 0' \
+    '}' \
+    'devices {' \
+    '    obtain_device_list_from_udev = 0' \
+    '}' \
+    > /etc/lvm/lvmlocal.conf \
+    && echo "--- lvmlocal.conf ---" && cat /etc/lvm/lvmlocal.conf \
+    && lvmconfig activation/udev_sync devices/obtain_device_list_from_udev
 
 # Belt and braces: device-mapper also consults this. lvmlocal.conf is the
 # primary fix because it is read from disk on every LVM invocation and so
