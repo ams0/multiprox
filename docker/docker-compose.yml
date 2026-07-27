@@ -145,12 +145,12 @@ services:
       - "${PVE1_UI_PORT:-8006}:8006"
       - "${PVE1_SSH_PORT:-22201}:22"
     volumes:
-      # ceph-volume (used by `pveceph osd create`) reads device
-      # properties from the udev database via pyudev. There is no udevd
-      # in the container, so without the host's database it fails with:
-      #   RuntimeError: No udev data could be retrieved for /sys/block/sdX
-      # Read-only: we consume the host's data, never write to it.
-      - /run/udev:/run/udev:ro
+      # NOTE: the host's /run/udev must NOT be mounted here. It was, to give
+      # ceph-volume a udev database, but a read-only /run/udev stops the
+      # container's own udevd from binding its control socket:
+      #   systemd-udevd: Failed to bind udev control socket: Address already in use
+      # and without udevd `rbd map` never returns, so no LXC guest on RBD can
+      # start. The node runs its own udevd instead and builds its own database.
       - pve1-cluster:/var/lib/pve-cluster
       # Ceph mon/mgr/OSD state. Same trap as /etc/corosync: `pveceph mon
       # create` writes here, but it is on the container filesystem, so
@@ -182,12 +182,12 @@ services:
       - "${PVE2_UI_PORT:-8007}:8006"
       - "${PVE2_SSH_PORT:-22202}:22"
     volumes:
-      # ceph-volume (used by `pveceph osd create`) reads device
-      # properties from the udev database via pyudev. There is no udevd
-      # in the container, so without the host's database it fails with:
-      #   RuntimeError: No udev data could be retrieved for /sys/block/sdX
-      # Read-only: we consume the host's data, never write to it.
-      - /run/udev:/run/udev:ro
+      # NOTE: the host's /run/udev must NOT be mounted here. It was, to give
+      # ceph-volume a udev database, but a read-only /run/udev stops the
+      # container's own udevd from binding its control socket:
+      #   systemd-udevd: Failed to bind udev control socket: Address already in use
+      # and without udevd `rbd map` never returns, so no LXC guest on RBD can
+      # start. The node runs its own udevd instead and builds its own database.
       - pve2-cluster:/var/lib/pve-cluster
       # Ceph mon/mgr/OSD state. Same trap as /etc/corosync: `pveceph mon
       # create` writes here, but it is on the container filesystem, so
@@ -221,12 +221,12 @@ services:
       - "${PVE3_UI_PORT:-8008}:8006"
       - "${PVE3_SSH_PORT:-22203}:22"
     volumes:
-      # ceph-volume (used by `pveceph osd create`) reads device
-      # properties from the udev database via pyudev. There is no udevd
-      # in the container, so without the host's database it fails with:
-      #   RuntimeError: No udev data could be retrieved for /sys/block/sdX
-      # Read-only: we consume the host's data, never write to it.
-      - /run/udev:/run/udev:ro
+      # NOTE: the host's /run/udev must NOT be mounted here. It was, to give
+      # ceph-volume a udev database, but a read-only /run/udev stops the
+      # container's own udevd from binding its control socket:
+      #   systemd-udevd: Failed to bind udev control socket: Address already in use
+      # and without udevd `rbd map` never returns, so no LXC guest on RBD can
+      # start. The node runs its own udevd instead and builds its own database.
       - pve3-cluster:/var/lib/pve-cluster
       # Ceph mon/mgr/OSD state. Same trap as /etc/corosync: `pveceph mon
       # create` writes here, but it is on the container filesystem, so
@@ -284,6 +284,12 @@ networks:
   # subnet, using 10.20.0.1 as their gateway. No extra NAT is configured in the
   # containers.
   guest-net:
+    # Pinned rather than left to Compose's <project>_<network> naming, which
+    # derives the project from the directory name. Guests get addresses on this
+    # subnet and keep them; a network whose identity depends on what the
+    # checkout is called is a poor foundation for that. It also means the name
+    # is stable if the same subnet is ever attached to by hand.
+    name: multiprox_guest-net
     driver: bridge
     ipam:
       driver: default

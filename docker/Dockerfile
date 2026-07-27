@@ -103,13 +103,37 @@ RUN grep -rlZ 'enterprise\.proxmox\.com' /etc/apt/sources.list.d/ 2>/dev/null \
       | xargs -0 -r rm -f \
     && echo "remaining apt sources:" && ls /etc/apt/sources.list.d/
 
-# ── Optional: QEMU/KVM and LXC (Linux host with /dev/kvm only) ──────────────
-# Uncomment if you have a Linux host and want full VM + container support.
+# ── LXC guests ───────────────────────────────────────────────────────────────
+# pve-container works in this environment; QEMU does not, and needs /dev/kvm on
+# the host (unavailable on most cloud VMs, which do not expose nested virt).
+#
+# lxcfs gives guests a per-container view of /proc. LXC will not start a guest
+# without it — the mount hook fails with "missing /var/lib/lxcfs/proc/ - lxcfs
+# not running?" — and its unit refuses to start in a container by design:
+#
+#   ConditionVirtualization=!container was not met
+#
+# That condition guards against running lxcfs inside an LXC guest, where it
+# would be meaningless. Here the "container" is the PVE node itself, which is
+# precisely where lxcfs belongs, so the condition is cleared.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pve-container \
+        lxcfs \
+        lxc-pve \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /etc/systemd/system/lxcfs.service.d \
+    && printf '%s\n' \
+        '[Unit]' \
+        '# The node is itself a container; lxcfs is needed here, not skipped.' \
+        'ConditionVirtualization=' \
+        > /etc/systemd/system/lxcfs.service.d/10-multiprox-allow-container.conf \
+    && systemctl enable lxcfs 2>/dev/null || true
+
+# ── Optional: QEMU/KVM (Linux host with /dev/kvm only) ──────────────────────
 # ARG ENABLE_KVM=0
 # RUN if [ "$ENABLE_KVM" = "1" ]; then \
 #       apt-get update && apt-get install -y --no-install-recommends \
 #           qemu-server \
-#           pve-container \
 #       && rm -rf /var/lib/apt/lists/*; \
 #     fi
 
@@ -186,19 +210,92 @@ ENV DM_DISABLE_UDEV=1
 
 # ── Systemd container hygiene ─────────────────────────────────────────────────
 # Disable units that either don't apply or conflict inside a container.
+#
+# systemd-udevd is deliberately NOT masked, though masking it is the usual
+# container advice. Kernel uevents do reach a Docker container's namespace
+# (verified with `udevadm monitor`), and two things depend on udev running:
+#
+#   • `rbd map` waits for udev to confirm the device before returning. With no
+#     udevd the command hangs forever — the mapping succeeds in the kernel, but
+#     Proxmox never gets the device path, so every LXC container on RBD hangs
+#     mid-create and leaves a stuck "lock: create" behind.
+#   • ceph-volume reads device properties from the udev database.
+#
+# It replaces the host's /run/udev, which used to be bind-mounted in for
+# ceph-volume's benefit. That mount has to go: udevd cannot bind its control
+# socket over a read-only one ("Address already in use").
 RUN systemctl mask \
         dev-hugepages.mount \
         getty@tty1.service \
         serial-getty@.service \
         sys-fs-fuse-connections.mount \
         systemd-logind.service \
-        systemd-udevd.service \
         systemd-modules-load.service \
     2>/dev/null || true \
     && systemctl disable \
         apt-daily.timer \
         apt-daily-upgrade.timer \
     2>/dev/null || true
+
+# ── udev: create device nodes the kernel cannot ──────────────────────────────
+# On a normal host /dev is devtmpfs and the KERNEL creates device nodes; udev
+# only adds symlinks and properties. A container's /dev is a plain tmpfs, so
+# nothing creates the node at all, and `rbd map` fails at the last step even
+# with udevd running:
+#
+#   rbd: mapping succeeded but /dev/rbd0 is not accessible, is host /dev mounted?
+#
+# Mounting the host's /dev would fix it and is what the error suggests, but it
+# would also shadow the container's own /dev/pts and /dev/shm — including the
+# 1 GB /dev/shm that Corosync needs. Creating just the rbd nodes is enough.
+# Ceph's own 50-rbd.rules then adds the /dev/rbd/<pool>/<image> symlinks that
+# Proxmox looks the volume up by.
+COPY scripts/rbd-mknod.sh /usr/local/bin/rbd-mknod
+RUN chmod +x /usr/local/bin/rbd-mknod \
+    && printf '%s\n' \
+    '# multiprox: container /dev is tmpfs, not devtmpfs — create rbd nodes here.' \
+    'SUBSYSTEM=="block", KERNEL=="rbd[0-9]*", ACTION=="add", RUN+="/usr/local/bin/rbd-mknod %k %M %m"' \
+    'SUBSYSTEM=="block", KERNEL=="rbd[0-9]*", ACTION=="remove", RUN+="/bin/rm -f /dev/%k"' \
+    > /etc/udev/rules.d/10-multiprox-rbd.rules
+
+# Populate the node's own udev database once udevd is up. ceph-volume reads
+# device properties from it and fails without them:
+#
+#   RuntimeError: No udev data could be retrieved for /sys/block/sdX
+#
+# The stock systemd-udev-trigger.service is skipped in a container, and the
+# database used to come from the host's bind-mounted /run/udev, which is no
+# longer mounted. Block devices only — that is all ceph-volume looks at, and a
+# full trigger would replay every device on the host.
+RUN printf '%s\n' \
+    '[Unit]' \
+    'Description=multiprox: populate the udev database for ceph-volume' \
+    'After=systemd-udevd.service' \
+    'Requires=systemd-udevd.service' \
+    '' \
+    '[Service]' \
+    'Type=oneshot' \
+    'RemainAfterExit=yes' \
+    'ExecStart=/bin/udevadm trigger --action=add --subsystem-match=block' \
+    'ExecStart=/bin/udevadm settle --timeout=30' \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target' \
+    > /etc/systemd/system/multiprox-udev-trigger.service \
+    && systemctl enable multiprox-udev-trigger.service 2>/dev/null || true
+
+# ── rbd unmap must retry ─────────────────────────────────────────────────────
+# See scripts/rbd-unmap-retry.sh: the kernel holds an rbd device for ~20s after
+# the rootfs is unmounted while writeback drains to the (loop-backed, 3x
+# replicated) OSDs, and PVE's unmap_volume tries exactly once. Every container
+# creation therefore rolled back at the final step, after the rootfs had already
+# been built. dpkg-divert so a ceph-common upgrade cannot silently undo it.
+COPY scripts/rbd-unmap-retry.sh /usr/local/share/multiprox/rbd-unmap-retry.sh
+RUN if [ "$ENABLE_CEPH" = "1" ]; then \
+      dpkg-divert --divert /usr/bin/rbd.distrib --rename --add /usr/bin/rbd \
+      && install -m 0755 /usr/local/share/multiprox/rbd-unmap-retry.sh /usr/bin/rbd \
+      && /usr/bin/rbd --version; \
+    fi
 
 # ── SSH daemon ────────────────────────────────────────────────────────────────
 # pvecm join SSHs from new nodes into node1 to exchange credentials.

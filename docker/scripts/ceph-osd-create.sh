@@ -63,6 +63,20 @@ log()  { echo "[ceph-osd] $*"; }
 warn() { echo "[ceph-osd] WARNING: $*" >&2; }
 fail() { echo "[ceph-osd] ERROR: $*" >&2; exit 1; }
 
+# --fence-only: do the LVM/device-mapper preparation and stop, creating nothing.
+#
+# The entrypoint runs this on every boot. Both things Pass 1 sets up live on the
+# container filesystem, not on a volume, so recreating a container silently
+# reverts them: /etc/lvm/lvmlocal.conf goes back to the image default with no
+# filter, and the /dev/mapper nodes are gone with the old /dev. The OSDs are
+# fine on disk, but the ceph-volume units that activate them at boot are then
+# scanning with exactly the broken view that Pass 1 exists to prevent.
+FENCE_ONLY=0
+if [ "${1:-}" = "--fence-only" ]; then
+    FENCE_ONLY=1
+    shift
+fi
+
 # Translate a mapped device node to its kernel name, creating the node if the
 # name is not already present in /dev. Prints the resolved path.
 resolve_device() {
@@ -96,7 +110,11 @@ fi
 [ ${#DEVICES[@]} -gt 0 ] || fail "no OSD devices given and no /dev/ceph-osd-* present.
        Start the cluster with docker-compose.ceph.yml and set PVE*_OSD_DEVICE."
 
-[ -f /etc/pve/ceph.conf ] || fail "/etc/pve/ceph.conf missing — run 'pveceph init' first."
+# Not required to fence: that runs from the entrypoint, before systemd has
+# started pve-cluster, so /etc/pve is still an empty mountpoint.
+if [ "${FENCE_ONLY}" -eq 0 ]; then
+    [ -f /etc/pve/ceph.conf ] || fail "/etc/pve/ceph.conf missing — run 'pveceph init' first."
+fi
 
 ##############################################################################
 # Pass 1 — resolve every device, then reconcile this node's view of LVM.
@@ -188,6 +206,11 @@ dmsetup mknodes >/dev/null 2>&1 || true
 # from the stale view for the rest of this run.
 rm -rf /run/lvm/cache /etc/lvm/cache 2>/dev/null || true
 pvscan --cache >/dev/null 2>&1 || true
+
+if [ "${FENCE_ONLY}" -eq 1 ]; then
+    log "fence-only: LVM view and /dev/mapper nodes prepared, creating nothing."
+    exit 0
+fi
 
 # ceph-volume authenticates as client.bootstrap-osd. pveceph would mint this on
 # demand; calling ceph-volume directly, we have to stage it ourselves. The

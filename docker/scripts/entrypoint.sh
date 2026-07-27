@@ -70,6 +70,18 @@ elif [ -n "$(ls -A /etc/pve 2>/dev/null)" ]; then
     rm -rf /etc/pve/* /etc/pve/.[!.]* 2>/dev/null || true
 fi
 
+# ── Ceph OSD device view ─────────────────────────────────────────────────────
+# Re-apply the node-local LVM filter and /dev/mapper nodes before systemd runs.
+# Both live on the container filesystem rather than a volume, so a recreated
+# container starts with neither, and the ceph-volume units that activate the
+# OSDs at boot would scan with a view that includes every other node's volume
+# groups. Skipped silently when this node has no OSD devices mapped.
+if [ -x /usr/local/bin/ceph-osd-create ] && ls /dev/ceph-osd-* >/dev/null 2>&1; then
+    log "Preparing OSD device view..."
+    /usr/local/bin/ceph-osd-create --fence-only \
+        || log "WARNING: OSD device fencing failed; OSDs may not activate."
+fi
+
 # ── Guest bridge (vmbr0) ─────────────────────────────────────────────────────
 # Built before systemd so that /etc/network/interfaces is already correct when
 # pvedaemon reads it, and ifupdown never sees the stale build-time file.

@@ -91,8 +91,10 @@ for i in $(seq 4 "$N"); do
       - "\${PVE${i}_UI_PORT:-${ui}}:8006"
       - "\${PVE${i}_SSH_PORT:-${ssh_port}}:22"
     volumes:
-      # ceph-volume reads device properties from the host udev database.
-      - /run/udev:/run/udev:ro
+      # No /run/udev bind mount: it would block the node's own udevd, which
+      # rbd map depends on. See docker-compose.yml for the full reason.
+      # (No backticks in this heredoc — it is unquoted so that \${ip} expands,
+      # which means backticks would run as command substitution.)
       - pve${i}-cluster:/var/lib/pve-cluster
       # corosync authkey lives here and is NOT in pmxcfs; losing it stops
       # corosync from starting after a container is recreated.
