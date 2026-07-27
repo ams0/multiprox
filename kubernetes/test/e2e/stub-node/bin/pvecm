@@ -1,0 +1,125 @@
+#!/bin/bash
+# Stub pvecm — E2E only.
+#
+# Models just enough Proxmox cluster behaviour for the operator's real
+# cluster-init.sh / cluster-join.sh / cluster-inventory.sh to drive:
+#
+#   status  exit 0 once this node is a cluster member, non-zero before.
+#           Both real scripts use this as their idempotency guard.
+#   create  marks this node a member (pvecm create on ordinal 0).
+#   add     marks this node a member (pvecm add on ordinals 1..N-1).
+#   nodes   prints a membership table in the real column layout.
+#
+# Membership state lives on the cluster-data PVC, mirroring how pmxcfs state
+# persists across restarts on a real node — so a pod restart does not
+# re-trigger cluster creation.
+#
+# Peers are discovered over the headless Service's DNS rather than hardcoded,
+# so this adapts to whatever spec.nodes the test uses.
+
+set -uo pipefail
+
+STATE_DIR="/var/lib/pve-cluster"
+MEMBER_MARK="${STATE_DIR}/.clustered"
+NAME_MARK="${STATE_DIR}/.cluster_name"
+
+SELF="$(hostname -s 2>/dev/null || hostname)"
+# Strip the trailing -<ordinal> to recover the StatefulSet (and cluster) name.
+PREFIX="${SELF%-*}"
+NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo default)"
+HEADLESS="${PREFIX}-headless"
+
+log() { echo "[stub-pvecm/${SELF}] $*" >&2; }
+
+# Enumerate peers that currently resolve in DNS. publishNotReadyAddresses on the
+# headless Service means pods appear as soon as they exist.
+discover_peers() {
+  local i fqdn
+  for i in $(seq 0 31); do
+    fqdn="${PREFIX}-${i}.${HEADLESS}.${NS}.svc.cluster.local"
+    if getent hosts "${fqdn}" >/dev/null 2>&1; then
+      echo "${PREFIX}-${i}"
+    fi
+  done
+}
+
+case "${1:-}" in
+  status)
+    if [ -f "${MEMBER_MARK}" ]; then
+      echo "Cluster information"
+      echo "-------------------"
+      echo "Name:             $(cat "${NAME_MARK}" 2>/dev/null || echo stub)"
+      echo "Config Version:   $(discover_peers | wc -l | tr -d ' ')"
+      echo "Transport:        knet"
+      echo ""
+      echo "Quorum information"
+      echo "------------------"
+      echo "Quorate:          Yes"
+      exit 0
+    fi
+    log "node is not part of a cluster"
+    exit 2
+    ;;
+
+  create)
+    shift
+    CLUSTER_NAME="${1:-stub-cluster}"
+    if [ -f "${MEMBER_MARK}" ]; then
+      log "already clustered; create is a no-op"
+      exit 0
+    fi
+    mkdir -p "${STATE_DIR}"
+    echo "${CLUSTER_NAME}" > "${NAME_MARK}"
+    touch "${MEMBER_MARK}"
+    # A real pvecm create writes corosync.conf into pmxcfs.
+    mkdir -p /etc/pve
+    printf 'totem {\n  cluster_name: %s\n}\n' "${CLUSTER_NAME}" > /etc/pve/corosync.conf
+    log "created cluster '${CLUSTER_NAME}'"
+    exit 0
+    ;;
+
+  add)
+    shift
+    PEER="${1:-unknown}"
+    if [ -f "${MEMBER_MARK}" ]; then
+      log "already clustered; add is a no-op"
+      exit 0
+    fi
+    mkdir -p "${STATE_DIR}"
+    echo "${PREFIX}" > "${NAME_MARK}"
+    touch "${MEMBER_MARK}"
+    mkdir -p /etc/pve
+    printf 'totem {\n  cluster_name: %s\n}\n' "${PREFIX}" > /etc/pve/corosync.conf
+    log "joined cluster via ${PEER}"
+    exit 0
+    ;;
+
+  nodes)
+    # Real column layout — cluster-inventory.sh skips the first two lines and
+    # then reads: <nodeid> <votes> <name> [(local)]
+    echo "Membership information"
+    echo "----------------------"
+    echo "    Nodeid      Votes Name"
+    i=1
+    while read -r peer; do
+      [ -n "${peer}" ] || continue
+      if [ "${peer}" = "${SELF}" ]; then
+        printf '%10d %10d %s (local)\n' "${i}" 1 "${peer}"
+      else
+        printf '%10d %10d %s\n' "${i}" 1 "${peer}"
+      fi
+      i=$((i + 1))
+    done < <(discover_peers)
+    exit 0
+    ;;
+
+  delnode)
+    log "delnode ${2:-} (stub no-op)"
+    exit 0
+    ;;
+
+  *)
+    log "unhandled subcommand: ${1:-<none>}"
+    exit 0
+    ;;
+esac

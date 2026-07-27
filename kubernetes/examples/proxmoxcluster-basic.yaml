@@ -1,0 +1,41 @@
+---
+# Basic 3-node Proxmox VE cluster with default settings.
+# Deploy with: kubectl apply -f examples/proxmoxcluster-basic.yaml
+apiVersion: proxmox.multiprox.io/v1alpha1
+kind: ProxmoxCluster
+metadata:
+  name: lab-cluster
+  namespace: default
+  annotations:
+    multiprox.io/description: "3-node lab cluster for homelab / dev testing"
+spec:
+  nodes: 3
+  clusterName: lab-cluster
+
+  # Build the PVE node image from docker/Dockerfile and push to your registry.
+  image: ghcr.io/feynman/multiprox-node:latest
+  imagePullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "2Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+
+  storage:
+    clusterData:
+      size: "2Gi"
+      # storageClass: fast-ssd   # uncomment to use a specific StorageClass
+    vmStorage:
+      size: "50Gi"
+
+  corosync:
+    transport: knet
+    crypto: aes256
+    hash: sha256
+
+  # Spread PVE pods across different Kubernetes nodes for availability.
+  # The operator applies a soft anti-affinity by default; override here if needed.
+  # affinity: {}

@@ -1,0 +1,13 @@
+---
+# The operator's namespace, in its own manifest so that both `make install`
+# (CRDs + RBAC) and `make deploy` (the Deployment) can apply it first.
+#
+# It lives here rather than inside manager/deployment.yaml because the
+# ServiceAccount in config/rbac/ is namespaced: applying RBAC before the
+# namespace exists fails with "namespaces \"multiprox-system\" not found".
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: multiprox-system
+  labels:
+    app.kubernetes.io/name: multiprox-operator

@@ -1,0 +1,21 @@
+apiVersion: v2
+name: multiprox-operator
+description: Kubernetes operator for managing Proxmox VE clusters as StatefulSets
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - proxmox
+  - operator
+  - virtualization
+  - ceph
+  - statefulset
+home: https://github.com/feynman/multiprox
+sources:
+  - https://github.com/feynman/multiprox
+maintainers:
+  - name: Feynman
+    email: alessandro@stackmasters.com
+annotations:
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Basic Install

@@ -1,0 +1,66 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multiprox-operator-role
+  labels:
+    app.kubernetes.io/name: multiprox-operator
+    app.kubernetes.io/component: rbac
+rules:
+  # ProxmoxCluster CRD
+  - apiGroups: [proxmox.multiprox.io]
+    resources: [proxmoxclusters]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [proxmox.multiprox.io]
+    resources: [proxmoxclusters/status]
+    verbs: [get, update, patch]
+  - apiGroups: [proxmox.multiprox.io]
+    resources: [proxmoxclusters/finalizers]
+    verbs: [update]
+
+  # ProxmoxNode — observed-state projection written by the operator
+  - apiGroups: [proxmox.multiprox.io]
+    resources: [proxmoxnodes]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [proxmox.multiprox.io]
+    resources: [proxmoxnodes/status]
+    verbs: [get, update, patch]
+
+  # StatefulSets
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+
+  # Services, ConfigMaps
+  - apiGroups: [""]
+    resources: [services, configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+
+  # Pods — for exec and status polling
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+
+  # PersistentVolumeClaims — observe OSD block volumes created from
+  # the StatefulSet's volumeClaimTemplates
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch]
+
+  # Secrets — to read root-password secret
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+
+  # Events — for status reporting
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+
+  # Leader election
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]

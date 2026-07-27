@@ -1,0 +1,33 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# Holds ROOT_PASSWORD. Copy .env.example to .env and edit; never commit .env.
+.env
+docker/.env
+
+# ── Generated / build artifacts ────────────────────────────────────────────────
+# Produced by `make scale N=<n>` in docker/
+docker-compose.scale.yml
+docker/docker-compose.scale.yml
+
+# Go: test coverage and compiled binaries
+coverage.out
+coverage.html
+*.test
+*.out
+kubernetes/operator/manager
+
+# ── Kubernetes / local state ──────────────────────────────────────────────────
+kubeconfig
+*.kubeconfig
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+
+# ── Editors ───────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log

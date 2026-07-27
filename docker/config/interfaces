@@ -1,0 +1,29 @@
+# /etc/network/interfaces — multiprox node
+#
+# Proxmox VE expects at least one Linux bridge (vmbr0) for attaching VMs
+# and LXC containers. In a Docker container the physical NIC is eth0, but
+# we cannot create a traditional bridge without host-level networking.
+#
+# This configuration:
+#   • Brings up the container's primary interface (eth0) via DHCP
+#   • Declares vmbr0 as a bridge over eth0 so pveproxy/qemu-server don't
+#     complain about a missing bridge
+#
+# For production / Linux-host deployments replace this with your actual
+# bridge configuration (OVS, VLAN-aware bridge, bonding, etc.).
+
+auto lo
+iface lo inet loopback
+
+# Primary interface — Docker assigns this IP via its bridge
+auto eth0
+iface eth0 inet dhcp
+
+# Proxmox VM bridge — bridged to eth0
+# On Docker Desktop this is advisory; real VM traffic uses the Docker network.
+auto vmbr0
+iface vmbr0 inet manual
+    bridge-ports eth0
+    bridge-stp off
+    bridge-fd 0
+    bridge-vlan-aware yes

@@ -1,0 +1,53 @@
+#!/bin/bash
+# Stub pveceph — E2E only.
+#
+# `init` is modelled because it is pure configuration and the operator's
+# ceph-init.sh idempotency guard keys off the resulting /etc/pve/ceph.conf.
+#
+# Daemon creation (mon/mgr/osd) FAILS on purpose. In this environment there are
+# no raw block devices, so a real pveceph would fail too. Returning success
+# would make the operator report a Ceph cluster that does not exist — the exact
+# false-positive the Ceph e2e tests exist to rule out.
+
+set -uo pipefail
+
+log() { echo "[stub-pveceph/$(hostname -s)] $*" >&2; }
+
+case "${1:-}" in
+  init)
+    mkdir -p /etc/pve
+    {
+      echo "[global]"
+      echo "  fsid = 00000000-0000-0000-0000-000000000000"
+      echo "  # written by e2e stub pveceph init $*"
+    } > /etc/pve/ceph.conf
+    log "wrote /etc/pve/ceph.conf"
+    exit 0
+    ;;
+
+  mon|mgr)
+    log "cannot create ${1}: no functioning Ceph cluster in the e2e environment"
+    exit 1
+    ;;
+
+  osd)
+    shift
+    DEV="${2:-unknown}"
+    if [ ! -b "${DEV}" ]; then
+      log "device ${DEV} is not a block device (expected: kind local-path cannot provide raw block volumes)"
+      exit 1
+    fi
+    log "refusing to fabricate an OSD on ${DEV} in a stub environment"
+    exit 1
+    ;;
+
+  pool)
+    log "cannot create pool: no functioning Ceph cluster"
+    exit 1
+    ;;
+
+  *)
+    log "unhandled: ${*:-<none>}"
+    exit 1
+    ;;
+esac

@@ -1,0 +1,396 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: proxmoxclusters.proxmox.multiprox.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+spec:
+  group: proxmox.multiprox.io
+  names:
+    kind: ProxmoxCluster
+    listKind: ProxmoxClusterList
+    plural: proxmoxclusters
+    singular: proxmoxcluster
+    shortNames:
+      - pxc
+      - proxmox
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+        scale:
+          specReplicasPath: .spec.nodes
+          statusReplicasPath: .status.joinedNodes
+      additionalPrinterColumns:
+        - name: Nodes
+          type: integer
+          jsonPath: .spec.nodes
+        - name: Joined
+          type: integer
+          jsonPath: .status.joinedNodes
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Ceph
+          type: string
+          jsonPath: .status.ceph.health
+        - name: OSDs
+          type: string
+          jsonPath: .status.ceph.osdSummary
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >
+            ProxmoxCluster is the Schema for the proxmoxclusters API. It
+            describes a multi-node Proxmox VE cluster deployed as a Kubernetes
+            StatefulSet, optionally with a hyper-converged Ceph cluster
+            configured natively from inside Proxmox via pveceph, backed by
+            raw-block PersistentVolumeClaims.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required: [nodes, image]
+              properties:
+                nodes:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  default: 3
+                  description: >
+                    Total number of Proxmox VE nodes. Minimum 1; 3 or more
+                    recommended for Corosync quorum.
+                clusterName:
+                  type: string
+                  default: multiprox
+                  maxLength: 15
+                  pattern: '^[a-z0-9][a-z0-9\-]{0,14}$'
+                  description: Proxmox cluster name (pvecm create <name>).
+                image:
+                  type: string
+                  default: "ghcr.io/feynman/multiprox-node:latest"
+                  description: >
+                    Container image for each PVE node. Must include the Proxmox
+                    Ceph packages when spec.ceph is set — build
+                    docker/Dockerfile with --build-arg ENABLE_CEPH=1.
+                imagePullPolicy:
+                  type: string
+                  default: IfNotPresent
+                  enum: [Always, IfNotPresent, Never]
+                imagePullSecrets:
+                  type: array
+                  items:
+                    type: object
+                    required: [name]
+                    properties:
+                      name:
+                        type: string
+                resources:
+                  type: object
+                  description: >
+                    Resource requests/limits for each PVE container. Budget
+                    roughly 1 CPU and 4Gi extra per OSD when Ceph is enabled.
+                  properties:
+                    requests:
+                      type: object
+                      additionalProperties:
+                        anyOf:
+                          - type: integer
+                          - type: string
+                        x-kubernetes-int-or-string: true
+                    limits:
+                      type: object
+                      additionalProperties:
+                        anyOf:
+                          - type: integer
+                          - type: string
+                        x-kubernetes-int-or-string: true
+                storage:
+                  type: object
+                  default: {}
+                  description: System PVC configuration for each node.
+                  properties:
+                    clusterData:
+                      type: object
+                      default:
+                        size: "2Gi"
+                      description: >
+                        PVC for /var/lib/pve-cluster (Corosync DB, pmxcfs).
+                        Should be on fast storage. 1-5 Gi is enough.
+                      properties:
+                        storageClass:
+                          type: string
+                        size:
+                          type: string
+                          default: "2Gi"
+                          pattern: '^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$'
+                    vmStorage:
+                      type: object
+                      default:
+                        size: "100Gi"
+                      description: >
+                        PVC for /var/lib/vz (ISO images, CT templates, local VM
+                        disks, backups). When Ceph is enabled VM disks normally
+                        live on Ceph RBD, so this can stay small.
+                      properties:
+                        storageClass:
+                          type: string
+                        size:
+                          type: string
+                          default: "100Gi"
+                          pattern: '^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$'
+                corosync:
+                  type: object
+                  default: {}
+                  description: Corosync clustering parameters.
+                  properties:
+                    transport:
+                      type: string
+                      default: knet
+                      enum: [knet, udpu]
+                    crypto:
+                      type: string
+                      default: aes256
+                      enum: [aes256, aes128, "none"]
+                    hash:
+                      type: string
+                      default: sha256
+                      enum: [sha256, sha384, sha512, "none"]
+
+                # ── Ceph ──────────────────────────────────────────────────────
+                ceph:
+                  type: object
+                  description: >
+                    Hyper-converged Ceph managed by Proxmox itself. The operator
+                    attaches raw-block PVCs to each PVE pod as OSD devices, then
+                    drives pveceph inside the cluster to create monitors,
+                    managers, OSDs and pools. No external storage operator is
+                    involved. Total OSDs = spec.nodes × spec.ceph.osdsPerNode.
+                  properties:
+                    osdsPerNode:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      maximum: 32
+                      default: 1
+                      description: >
+                        Number of raw-block PVCs attached to each PVE node as
+                        Ceph OSD devices. One OSD daemon per device. Changing
+                        this on an existing cluster requires recreating the
+                        StatefulSet, since volumeClaimTemplates are immutable.
+                    osdSize:
+                      type: string
+                      default: "100Gi"
+                      pattern: '^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$'
+                      description: >
+                        Capacity requested for each OSD block PVC. Ceph needs at
+                        least ~5Gi per OSD; 100Gi+ is typical.
+                    osdStorageClass:
+                      type: string
+                      description: >
+                        StorageClass for the OSD PVCs. MUST support
+                        volumeMode: Block — e.g. TopoLVM, OpenEBS, Longhorn, or
+                        a CSI driver exposing raw devices. Omit to use the
+                        cluster default, which may not support block mode.
+                    osdDevicePrefix:
+                      type: string
+                      default: "/dev/ceph-osd-"
+                      pattern: '^/dev/[a-zA-Z0-9._-]+$'
+                      description: >
+                        In-container device path prefix. The OSD index is
+                        appended, giving /dev/ceph-osd-0, /dev/ceph-osd-1, etc.
+                    network:
+                      type: string
+                      pattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+                      description: >
+                        Ceph public network CIDR for `pveceph init --network`.
+                        Must cover every PVE pod IP. Leave empty to derive a /16
+                        from the pod's own address, which matches most CNI pod
+                        CIDRs.
+                    clusterNetwork:
+                      type: string
+                      pattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+                      description: >
+                        Optional separate network for Ceph replication traffic.
+                        Requires a second pod interface (e.g. Multus).
+                    monCount:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 3
+                      description: >
+                        How many PVE nodes host a Ceph Monitor. Must be odd and
+                        no greater than spec.nodes.
+                    mgrCount:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 2
+                      description: >
+                        How many PVE nodes host a Ceph Manager. One is active,
+                        the rest stand by.
+                    pools:
+                      type: array
+                      description: >
+                        Ceph RBD pools to create and register as Proxmox storage.
+                        If empty, a single pool named "ceph-vm" is created for VM
+                        disks and container volumes.
+                      x-kubernetes-list-type: map
+                      x-kubernetes-list-map-keys: [name]
+                      items:
+                        type: object
+                        required: [name]
+                        properties:
+                          name:
+                            type: string
+                            pattern: '^[a-z0-9][a-z0-9._-]{0,62}$'
+                            description: Pool name, also used as the Proxmox storage ID.
+                          size:
+                            type: integer
+                            format: int32
+                            minimum: 1
+                            default: 3
+                            description: >
+                              Replica count. Must not exceed the total OSD count
+                              or the pool can never reach active+clean.
+                          minSize:
+                            type: integer
+                            format: int32
+                            minimum: 1
+                            default: 2
+                            description: Minimum replicas required to accept writes.
+                          pgNum:
+                            type: integer
+                            format: int32
+                            minimum: 0
+                            description: >
+                              Initial placement-group count. Leave unset or 0 to
+                              let Ceph's PG autoscaler decide (recommended).
+                          content:
+                            type: array
+                            default: [images, rootdir]
+                            description: >
+                              Proxmox content types this storage accepts.
+                              images = VM disks, rootdir = LXC volumes.
+                            items:
+                              type: string
+                              enum: [images, rootdir]
+                          addAsStorage:
+                            type: boolean
+                            default: true
+                            description: >
+                              Register the pool in Proxmox via `pvesm add rbd`.
+                              Set false to create the pool without exposing it.
+
+                nodeSelector:
+                  type: object
+                  additionalProperties:
+                    type: string
+                tolerations:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      key:
+                        type: string
+                      operator:
+                        type: string
+                      value:
+                        type: string
+                      effect:
+                        type: string
+                      tolerationSeconds:
+                        type: integer
+                        format: int64
+                affinity:
+                  type: object
+                  description: >
+                    Affinity rules for PVE pods. Overrides the operator's default
+                    soft anti-affinity (spread across Kubernetes nodes).
+                  x-kubernetes-preserve-unknown-fields: true
+
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Initializing, Joining, ConfiguringCeph, Ready, Degraded, Failed]
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [lastTransitionTime, message, reason, status, type]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                joinedNodes:
+                  type: integer
+                  format: int32
+                clusterID:
+                  type: string
+                corosyncConfigVersion:
+                  type: integer
+                  format: int64
+                ceph:
+                  type: object
+                  description: Observed state of the pveceph-managed Ceph cluster.
+                  properties:
+                    initialized:
+                      type: boolean
+                      description: True once pveceph init has written /etc/pve/ceph.conf.
+                    monitors:
+                      type: array
+                      items:
+                        type: string
+                    managers:
+                      type: array
+                      items:
+                        type: string
+                    osdsReady:
+                      type: integer
+                      format: int32
+                    osdsExpected:
+                      type: integer
+                      format: int32
+                    osdSummary:
+                      type: string
+                      description: Human-readable "ready/expected" OSD count.
+                    pools:
+                      type: array
+                      items:
+                        type: string
+                    health:
+                      type: string
+                      description: Raw `ceph health` output — HEALTH_OK / HEALTH_WARN / HEALTH_ERR.
+                    healthDetail:
+                      type: string
+                observedGeneration:
+                  type: integer
+                  format: int64

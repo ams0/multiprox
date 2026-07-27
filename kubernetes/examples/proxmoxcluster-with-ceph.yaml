@@ -1,0 +1,134 @@
+---
+# 5-node Proxmox VE cluster with hyper-converged Ceph, configured natively
+# from inside Proxmox via pveceph. No Rook, no external storage operator.
+#
+# How the disks work:
+#   Each PVE pod gets spec.ceph.osdsPerNode raw-block PVCs from the
+#   StatefulSet's volumeClaimTemplates. They appear inside the container as
+#   whole block devices at /dev/ceph-osd-0, /dev/ceph-osd-1, … The operator
+#   then runs `pveceph osd create /dev/ceph-osd-N` on each node, so Proxmox
+#   owns the Ceph cluster exactly as it would on bare metal.
+#
+#   Total OSDs here = 5 nodes × 4 disks = 20 OSDs × 200Gi = ~4Ti raw,
+#   ~1.3Ti usable at size=3.
+#
+# Prerequisites:
+#   1. A StorageClass that supports volumeMode: Block. The cluster default
+#      often does NOT. Verified options: TopoLVM, OpenEBS (device/lvm),
+#      Longhorn, Ceph-CSI RBD, and most cloud block CSI drivers
+#      (ebs.csi.aws.com, pd.csi.storage.gke.io, disk.csi.azure.com).
+#      Check with:  kubectl get sc
+#   2. A node image built with the Ceph packages:
+#        docker build --build-arg ENABLE_CEPH=1 -t <registry>/multiprox-node:ceph ./docker
+#   3. Privileged pods allowed in the namespace:
+#        kubectl label ns proxmox pod-security.kubernetes.io/enforce=privileged
+#
+# Deploy with: kubectl apply -f examples/proxmoxcluster-with-ceph.yaml
+
+apiVersion: proxmox.multiprox.io/v1alpha1
+kind: ProxmoxCluster
+metadata:
+  name: prod-cluster
+  namespace: proxmox
+  annotations:
+    multiprox.io/description: "5-node cluster, 20 OSDs, hyper-converged Ceph via pveceph"
+spec:
+  nodes: 5
+  clusterName: prod-cluster
+
+  # Image MUST be built with --build-arg ENABLE_CEPH=1.
+  image: ghcr.io/feynman/multiprox-node:ceph
+  imagePullPolicy: IfNotPresent
+
+  # Ceph OSDs are memory-hungry: budget ~4Gi per OSD on top of the PVE base.
+  # 4 OSDs/node → ~16Gi for Ceph + ~8Gi for PVE and VMs.
+  resources:
+    requests:
+      cpu: "4"
+      memory: "24Gi"
+    limits:
+      cpu: "16"
+      memory: "64Gi"
+
+  storage:
+    clusterData:
+      size: "5Gi"
+      storageClass: fast-ssd     # Corosync DB wants low latency
+    vmStorage:
+      size: "50Gi"               # ISOs + templates only; VM disks live on Ceph
+
+  corosync:
+    transport: knet
+    crypto: aes256
+    hash: sha256
+
+  # ── Ceph: raw-block PVCs + pveceph ────────────────────────────────────────
+  ceph:
+    # 4 OSD disks per node → 20 OSDs total across 5 nodes.
+    osdsPerNode: 4
+    osdSize: "200Gi"
+
+    # MUST support volumeMode: Block. This is the single most common
+    # misconfiguration — a filesystem StorageClass will leave the OSD
+    # devices missing and ceph-osd.sh will report them as non-block.
+    osdStorageClass: topolvm-provisioner
+
+    # Where the block devices appear inside the container.
+    osdDevicePrefix: "/dev/ceph-osd-"
+
+    # Ceph public network. Must cover every PVE pod IP. Leave unset to let
+    # the operator derive a /16 from the pod address, which is correct for
+    # most CNI pod CIDRs (Flannel 10.244.0.0/16, K3s 10.42.0.0/16, …).
+    network: "10.244.0.0/16"
+
+    # Separate replication network — needs a second pod interface (Multus).
+    # clusterNetwork: "10.245.0.0/16"
+
+    # 3 monitors (odd, ≤ nodes), 2 managers (1 active + 1 standby).
+    monCount: 3
+    mgrCount: 2
+
+    # Pools created with `pveceph pool create` and registered as Proxmox
+    # storage with `pvesm add rbd`.
+    pools:
+      # VM disks — 3× replication, survives 2 OSD losses.
+      - name: ceph-vm
+        size: 3
+        minSize: 2
+        content: [images]
+        # pgNum omitted → Ceph's PG autoscaler decides (recommended).
+
+      # LXC container root volumes.
+      - name: ceph-ct
+        size: 3
+        minSize: 2
+        content: [rootdir]
+
+      # A pool created but deliberately NOT exposed to Proxmox, e.g. for
+      # direct RBD use by other workloads.
+      - name: ceph-scratch
+        size: 2
+        minSize: 1
+        addAsStorage: false
+
+  # ── Placement ─────────────────────────────────────────────────────────────
+  # Hard anti-affinity: one PVE node per Kubernetes node. With Ceph this is
+  # important — two PVE pods on one host would put multiple replicas of the
+  # same data on a single failure domain.
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: proxmox-cluster
+              app.kubernetes.io/instance: prod-cluster
+          topologyKey: kubernetes.io/hostname
+
+  nodeSelector:
+    proxmox-eligible: "true"
+
+  tolerations:
+    - key: "proxmox"
+      operator: "Equal"
+      value: "true"
+      effect: NoSchedule

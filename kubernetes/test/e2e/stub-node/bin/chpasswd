@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stub chpasswd — E2E only (real one needs a full shadow setup).
+cat > /dev/null
+exit 0

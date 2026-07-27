@@ -1,0 +1,188 @@
+##############################################################################
+# multiprox — 3-node Proxmox VE cluster (Docker)
+#
+# Default layout
+#   pve1  10.10.0.11   web UI → localhost:8006   SSH → localhost:2221
+#   pve2  10.10.0.12   web UI → localhost:8007   SSH → localhost:2222
+#   pve3  10.10.0.13   web UI → localhost:8008   SSH → localhost:2223
+#
+# To add more nodes copy a node block, bump the IP/ports, and add the new
+# service name to the depends_on list on pve2/pve3.
+#
+# Quickstart
+#   make up           # start all nodes
+#   make cluster-init # create cluster on pve1
+#   make cluster-join # join pve2 + pve3
+#   make status       # pvecm status via pve1
+##############################################################################
+
+# Shared settings applied to every node via the YAML anchor &pve-common.
+x-pve-common: &pve-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+    # Uncomment on Linux with KVM to enable qemu-server + pve-container:
+    # args:
+    #   ENABLE_KVM: "1"
+
+  # Privileged is required for:
+  #   • systemd as PID 1
+  #   • pmxcfs FUSE mount at /etc/pve
+  #   • cgroup delegation for VM/LXC management
+  privileged: true
+
+  # systemd needs writable tmpfs on these paths
+  tmpfs:
+    - /tmp:mode=1777
+    - /run:mode=755
+    - /run/lock:mode=1777
+
+  # cgroup v2 hierarchy — read-only from the Docker host
+  volumes:
+    - /sys/fs/cgroup:/sys/fs/cgroup:ro
+
+  # Corosync is latency-sensitive — keep nodes on an isolated bridge
+  networks:
+    - proxmox-net
+
+  # Common environment variables
+  environment:
+    CLUSTER_NAME: ${CLUSTER_NAME:-multiprox}
+    NODE1_IP:     ${NODE1_IP:-10.10.0.11}
+    ROOT_PASSWORD: ${ROOT_PASSWORD:-proxmox}
+
+  restart: unless-stopped
+
+  # Health: PVE API responds on 8006 once pveproxy is up
+  healthcheck:
+    test: ["CMD", "curl", "-fsk", "https://localhost:8006"]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 60s
+
+##############################################################################
+# Nodes
+##############################################################################
+
+services:
+
+  # ── Node 1 — cluster bootstrap leader ─────────────────────────────────────
+  pve1:
+    <<: *pve-common
+    container_name: multiprox-pve1
+    hostname: pve1.multiprox.local
+    environment:
+      NODE_NAME: pve1
+      NODE_IP:   10.10.0.11
+      NODE_ID:   1
+      CLUSTER_NAME:  ${CLUSTER_NAME:-multiprox}
+      NODE1_IP:      ${NODE1_IP:-10.10.0.11}
+      ROOT_PASSWORD: ${ROOT_PASSWORD:-proxmox}
+    networks:
+      proxmox-net:
+        ipv4_address: 10.10.0.11
+    ports:
+      - "${PVE1_UI_PORT:-8006}:8006"
+      - "${PVE1_SSH_PORT:-2221}:22"
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - pve1-cluster:/var/lib/pve-cluster
+      - pve1-storage:/var/lib/vz
+      - pve1-logs:/var/log/pve
+
+  # ── Node 2 ────────────────────────────────────────────────────────────────
+  pve2:
+    <<: *pve-common
+    container_name: multiprox-pve2
+    hostname: pve2.multiprox.local
+    environment:
+      NODE_NAME: pve2
+      NODE_IP:   10.10.0.12
+      NODE_ID:   2
+      CLUSTER_NAME:  ${CLUSTER_NAME:-multiprox}
+      NODE1_IP:      ${NODE1_IP:-10.10.0.11}
+      ROOT_PASSWORD: ${ROOT_PASSWORD:-proxmox}
+    networks:
+      proxmox-net:
+        ipv4_address: 10.10.0.12
+    ports:
+      - "${PVE2_UI_PORT:-8007}:8006"
+      - "${PVE2_SSH_PORT:-2222}:22"
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - pve2-cluster:/var/lib/pve-cluster
+      - pve2-storage:/var/lib/vz
+      - pve2-logs:/var/log/pve
+    depends_on:
+      - pve1
+
+  # ── Node 3 ────────────────────────────────────────────────────────────────
+  pve3:
+    <<: *pve-common
+    container_name: multiprox-pve3
+    hostname: pve3.multiprox.local
+    environment:
+      NODE_NAME: pve3
+      NODE_IP:   10.10.0.13
+      NODE_ID:   3
+      CLUSTER_NAME:  ${CLUSTER_NAME:-multiprox}
+      NODE1_IP:      ${NODE1_IP:-10.10.0.11}
+      ROOT_PASSWORD: ${ROOT_PASSWORD:-proxmox}
+    networks:
+      proxmox-net:
+        ipv4_address: 10.10.0.13
+    ports:
+      - "${PVE3_UI_PORT:-8008}:8006"
+      - "${PVE3_SSH_PORT:-2223}:22"
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - pve3-cluster:/var/lib/pve-cluster
+      - pve3-storage:/var/lib/vz
+      - pve3-logs:/var/log/pve
+    depends_on:
+      - pve1
+
+  # ── Corosync QDevice (optional external quorum arbitrator) ────────────────
+  # Uncomment to support 2-node sub-clusters or split-brain prevention in
+  # even-node configurations. Must NOT run on a PVE node.
+  #
+  # qnetd:
+  #   image: modelrockettier/corosync-qnetd:latest
+  #   container_name: multiprox-qnetd
+  #   networks:
+  #     proxmox-net:
+  #       ipv4_address: 10.10.0.2
+  #   restart: unless-stopped
+  #   command: ["-f"]   # foreground
+
+##############################################################################
+# Network
+##############################################################################
+
+networks:
+  proxmox-net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet:  10.10.0.0/24
+          gateway: 10.10.0.1
+    driver_opts:
+      # Disable Docker's default inter-container isolation on this network
+      com.docker.network.bridge.enable_icc: "true"
+
+##############################################################################
+# Volumes
+##############################################################################
+
+volumes:
+  pve1-cluster:
+  pve1-storage:
+  pve1-logs:
+  pve2-cluster:
+  pve2-storage:
+  pve2-logs:
+  pve3-cluster:
+  pve3-storage:
+  pve3-logs:

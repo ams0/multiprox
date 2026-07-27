@@ -1,0 +1,194 @@
+############################################################################
+# multiprox — Proxmox VE management node (containerised)
+#
+# Base: Debian Bookworm + Proxmox VE packages (no kernel).
+#
+# What runs inside this container:
+#   • pvedaemon / pveproxy  → REST API + web UI on :8006
+#   • pve-cluster / pmxcfs  → cluster filesystem at /etc/pve (via Corosync)
+#   • corosync              → quorum and messaging between nodes
+#   • sshd                  → required for pvecm join and live migration
+#
+# What does NOT run (no kernel, no /dev/kvm on Mac Docker Desktop):
+#   • KVM-accelerated VMs   → needs /dev/kvm on the host
+#   • Nested LXC containers → needs privileged + lxcfs
+#
+# To enable VM/LXC capability (Linux host with KVM only):
+#   Uncomment the QEMU/LXC block below and set ENABLE_KVM=1 in .env
+############################################################################
+
+FROM debian:bookworm-slim
+
+LABEL org.opencontainers.image.title="multiprox node" \
+      org.opencontainers.image.description="Proxmox VE cluster node (containerised)" \
+      org.opencontainers.image.source="https://github.com/feynman/multiprox"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── Base OS ──────────────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        wget \
+        gnupg \
+        iproute2 \
+        iputils-ping \
+        net-tools \
+        openssh-server \
+        procps \
+        psmisc \
+        systemd \
+        systemd-sysv \
+        dbus \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Proxmox VE repository (no-subscription tier) ─────────────────────────────
+RUN wget -qO /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg \
+        https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg \
+    && echo "deb [arch=amd64] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
+         > /etc/apt/sources.list.d/pve.list \
+    && apt-get update
+
+# ── Proxmox VE — management + cluster layer (no kernel) ─────────────────────
+RUN apt-get install -y --no-install-recommends \
+        pve-manager \
+        pve-cluster \
+        corosync \
+        libpve-http-server-perl \
+        pve-firewall \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Optional: QEMU/KVM and LXC (Linux host with /dev/kvm only) ──────────────
+# Uncomment if you have a Linux host and want full VM + container support.
+# ARG ENABLE_KVM=0
+# RUN if [ "$ENABLE_KVM" = "1" ]; then \
+#       apt-get update && apt-get install -y --no-install-recommends \
+#           qemu-server \
+#           pve-container \
+#       && rm -rf /var/lib/apt/lists/*; \
+#     fi
+
+# ── Optional: Ceph (required by the Kubernetes operator's spec.ceph) ─────────
+# Build with --build-arg ENABLE_CEPH=1 to install the Proxmox Ceph packages so
+# `pveceph` works inside the container.
+#
+# lvm2 is essential, not incidental: `pveceph osd create` delegates to
+# ceph-volume, which creates an LVM PV/VG/LV on the raw block device it is
+# handed. Without lvm2 the OSD creation fails.
+#
+# gdisk/parted let ceph-volume zap and re-label devices on re-use.
+ARG ENABLE_CEPH=0
+RUN if [ "$ENABLE_CEPH" = "1" ]; then \
+      echo "deb [arch=amd64] http://download.proxmox.com/debian/ceph-reef bookworm no-subscription" \
+        > /etc/apt/sources.list.d/ceph.list \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends \
+           ceph \
+           ceph-common \
+           ceph-mon \
+           ceph-mgr \
+           ceph-osd \
+           ceph-volume \
+           lvm2 \
+           gdisk \
+           parted \
+           nvme-cli \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# ── LVM must not wait on udev inside a container ─────────────────────────────
+# `pveceph osd create` delegates to ceph-volume, which builds an LVM stack on
+# the target device. LVM normally asks udev to create the LV's device node and
+# then waits for it; there is no udev running in this container, so the wait
+# fails and OSD creation aborts with:
+#
+#   /dev/<vg>/<lv>: not found: device not cleared
+#   Aborting. Failed to wipe start of new LV.
+#
+# This is written as a drop-in rather than by editing lvm.conf, because Debian
+# ships every one of these settings COMMENTED OUT (`# udev_sync = 1`). A
+# sed that rewrites `udev_sync = 1` therefore matches nothing and silently
+# changes nothing — the failure still happens. lvmlocal.conf is read after
+# lvm.conf specifically to hold local overrides, so these values win.
+RUN mkdir -p /etc/lvm && cat > /etc/lvm/lvmlocal.conf <<'LVMCONF'
+# multiprox: allow LVM to operate without udev (containerised PVE node).
+activation {
+    udev_sync = 0
+    udev_rules = 0
+    verify_udev_operations = 0
+}
+devices {
+    obtain_device_list_from_udev = 0
+}
+LVMCONF
+
+# Belt and braces: device-mapper also consults this. lvmlocal.conf is the
+# primary fix because it is read from disk on every LVM invocation and so
+# survives systemd sanitising the environment of the services it spawns.
+ENV DM_DISABLE_UDEV=1
+
+# ── Systemd container hygiene ─────────────────────────────────────────────────
+# Disable units that either don't apply or conflict inside a container.
+RUN systemctl mask \
+        dev-hugepages.mount \
+        getty@tty1.service \
+        serial-getty@.service \
+        sys-fs-fuse-connections.mount \
+        systemd-logind.service \
+        systemd-udevd.service \
+        systemd-modules-load.service \
+    2>/dev/null || true \
+    && systemctl disable \
+        apt-daily.timer \
+        apt-daily-upgrade.timer \
+    2>/dev/null || true
+
+# ── SSH daemon ────────────────────────────────────────────────────────────────
+# pvecm join SSHs from new nodes into node1 to exchange credentials.
+RUN mkdir -p /var/run/sshd \
+    && sed -i \
+        -e 's/#PermitRootLogin.*/PermitRootLogin yes/' \
+        -e 's/#PasswordAuthentication.*/PasswordAuthentication yes/' \
+        /etc/ssh/sshd_config \
+    && ssh-keygen -A
+
+# Default root password — override via ROOT_PASSWORD env var in entrypoint.
+# CHANGE THIS before exposing to any network.
+RUN echo 'root:proxmox' | chpasswd
+
+# ── Dummy vmbr0 bridge ────────────────────────────────────────────────────────
+# PVE expects at least one Linux bridge (vmbr0) to attach VMs/containers.
+# In Docker we satisfy this requirement with a pre-configured interfaces file;
+# actual VM networking is handled separately per deployment.
+COPY config/interfaces /etc/network/interfaces
+
+# ── PVE datacenter defaults ───────────────────────────────────────────────────
+COPY config/datacenter.cfg /etc/pve/datacenter.cfg.default
+
+# ── Scripts ───────────────────────────────────────────────────────────────────
+COPY scripts/entrypoint.sh   /usr/local/bin/entrypoint.sh
+COPY scripts/cluster-init.sh /usr/local/bin/cluster-init
+COPY scripts/cluster-join.sh /usr/local/bin/cluster-join
+RUN chmod +x \
+        /usr/local/bin/entrypoint.sh \
+        /usr/local/bin/cluster-init \
+        /usr/local/bin/cluster-join
+
+# ── Persistent volumes ────────────────────────────────────────────────────────
+# /etc/pve        → cluster filesystem (pmxcfs, managed by pve-cluster)
+# /var/lib/pve-cluster → corosync DB + auth keys
+# /var/lib/vz     → VM images, ISO templates, backups
+# /var/log/pve    → PVE-specific logs
+VOLUME ["/var/lib/pve-cluster", "/var/lib/vz", "/var/log/pve"]
+
+# ── Ports ─────────────────────────────────────────────────────────────────────
+# 8006       PVE web UI / REST API (HTTPS)
+# 22         SSH (pvecm join, migration)
+# 5405-5412  Corosync (knet, UDP)
+# 111        rpcbind / portmapper (pmxcfs)
+EXPOSE 8006 22 5405-5412/udp 111
+
+# systemd shuts down cleanly on SIGRTMIN+3
+STOPSIGNAL SIGRTMIN+3
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

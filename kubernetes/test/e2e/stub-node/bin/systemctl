@@ -1,0 +1,39 @@
+#!/bin/bash
+# Stub systemctl — E2E only.
+#
+# The operator's readiness probe runs:
+#   systemctl is-active pve-cluster && systemctl is-active pveproxy
+# and cluster-init.sh / cluster-join.sh wait on `systemctl is-active pve-cluster`.
+#
+# Report the PVE units as active so readiness gating and those waits behave as
+# they would on a real node. Everything else reports inactive.
+
+case "$1" in
+  is-active)
+    case "$2" in
+      pve-cluster|pveproxy|pvedaemon|corosync)
+        echo active
+        exit 0
+        ;;
+      *)
+        echo inactive
+        exit 3
+        ;;
+    esac
+    ;;
+  is-enabled)
+    echo enabled
+    exit 0
+    ;;
+  status)
+    echo "● $2 - stub unit (e2e)"
+    echo "     Active: active (running)"
+    exit 0
+    ;;
+  mask|unmask|disable|enable|start|stop|restart|daemon-reload)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

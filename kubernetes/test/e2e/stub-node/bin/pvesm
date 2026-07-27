@@ -1,0 +1,5 @@
+#!/bin/bash
+# Stub pvesm — E2E only. Storage registration requires a real Ceph cluster.
+if [ "${1:-}" = "status" ]; then exit 0; fi
+echo "[stub-pvesm] cannot register storage without a Ceph cluster" >&2
+exit 1

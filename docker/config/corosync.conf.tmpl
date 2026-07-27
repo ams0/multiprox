@@ -1,0 +1,78 @@
+##############################################################################
+# Corosync configuration template — multiprox
+#
+# This file is for reference only. When you run `pvecm create` or
+# `pvecm add`, Proxmox generates /etc/pve/corosync.conf automatically.
+#
+# Use this template to understand the expected layout or to pre-stage a
+# config for a fresh cluster (rename to corosync.conf and copy to
+# /etc/pve/ before starting pve-cluster).
+#
+# Placeholders:  {{CLUSTER_NAME}}  {{NODES}}
+##############################################################################
+
+totem {
+    version:     2
+    cluster_name: {{CLUSTER_NAME}}
+
+    # knet = kernel network transport, supports multiple redundant rings
+    # and encryption. Preferred over udpu/udp for PVE 7+.
+    transport: knet
+
+    crypto_cipher: aes256
+    crypto_hash:   sha256
+
+    # Link0 is the primary inter-node network.
+    # Add link1 ... link7 for redundant rings (bonding at the Corosync level).
+    interface {
+        linknumber: 0
+    }
+}
+
+nodelist {
+    # One 'node { }' block per cluster member.
+    # ring0_addr must be reachable from all peers (static Docker IPs here).
+    # Example for a 3-node cluster on 10.10.0.0/24:
+    #
+    # node {
+    #     ring0_addr: 10.10.0.11
+    #     name:       pve1
+    #     nodeid:     1
+    # }
+    # node {
+    #     ring0_addr: 10.10.0.12
+    #     name:       pve2
+    #     nodeid:     2
+    # }
+    # node {
+    #     ring0_addr: 10.10.0.13
+    #     name:       pve3
+    #     nodeid:     3
+    # }
+
+    {{NODES}}
+}
+
+quorum {
+    provider: corosync_votequorum
+
+    # Uncomment to use an external QDevice (corosync-qnetd) for even-node
+    # clusters or 2-node split-brain prevention.
+    #
+    # device {
+    #     model: net
+    #     net {
+    #         algorithm: lms
+    #         host:       10.10.0.2    # QDevice container IP
+    #         port:       5403
+    #     }
+    # }
+}
+
+logging {
+    to_syslog: yes
+    logger_subsys {
+        subsys: QUORUM
+        debug:  off
+    }
+}

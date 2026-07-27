@@ -1,0 +1,75 @@
+##############################################################################
+# multiprox-operator — Helm values
+##############################################################################
+
+# -- Number of operator replicas (1 is correct; leader election handles HA).
+replicaCount: 1
+
+image:
+  repository: ghcr.io/feynman/multiprox-operator
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Kubernetes namespace to deploy the operator into.
+namespace: multiprox-system
+
+serviceAccount:
+  # -- Create a ServiceAccount for the operator.
+  create: true
+  name: multiprox-operator
+  annotations: {}
+
+# NOTE: the ProxmoxCluster CRD lives in crds/ and is installed by Helm
+# automatically, before any template renders. Helm does not template or upgrade
+# files in crds/ — to skip CRD installation (e.g. when GitOps owns CRDs) pass
+# `--skip-crds` at install time; to update the CRD, apply it with kubectl:
+#   kubectl apply -f kubernetes/config/crd/proxmoxclusters.yaml
+
+operator:
+  # -- Enable leader election (recommended for production; disable for dev).
+  leaderElection: true
+  # -- Maximum concurrent reconciles.
+  maxConcurrentReconciles: 5
+  # -- Log level (info | debug | error).
+  logLevel: info
+  # -- Extra args passed to the manager binary.
+  extraArgs: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# -- Pod-level security context for the operator deployment.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  readOnlyRootFilesystem: true
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Prometheus ServiceMonitor for scraping operator metrics.
+metrics:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}

@@ -1,0 +1,211 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: proxmoxnodes.proxmox.multiprox.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+    multiprox.io/projection: >-
+      Observed state only. These objects are created and maintained by the
+      multiprox operator; user edits are overwritten on the next reconcile.
+spec:
+  group: proxmox.multiprox.io
+  names:
+    kind: ProxmoxNode
+    listKind: ProxmoxNodeList
+    plural: proxmoxnodes
+    singular: proxmoxnode
+    shortNames:
+      - pxn
+      - pvenode
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterRef
+        - name: Ordinal
+          type: integer
+          jsonPath: .spec.ordinal
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: In-Cluster
+          type: boolean
+          jsonPath: .status.inCluster
+        - name: Mon
+          type: boolean
+          jsonPath: .status.ceph.monitor
+        - name: Mgr
+          type: boolean
+          jsonPath: .status.ceph.manager
+        - name: OSDs
+          type: string
+          jsonPath: .status.ceph.osdSummary
+        - name: Host
+          type: string
+          jsonPath: .status.kubernetesNode
+          priority: 1
+        - name: Observed
+          type: date
+          jsonPath: .status.observedAt
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >
+            ProxmoxNode is a read-only projection of one Proxmox VE node's
+            observed state.
+
+            Contract: the operator WRITES these objects and never READS them
+            back to make decisions. Desired state lives in ProxmoxCluster.spec;
+            observed state is re-derived each reconcile from the Kubernetes API
+            (pods) and from Proxmox itself (pvecm / ceph). Editing a ProxmoxNode
+            has no effect on the cluster.
+
+            Because this is a projection it can be stale — most obviously when
+            the operator is not running. status.observedAt records when the
+            projection last changed; treat an old value as unknown rather than
+            healthy.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required: [clusterRef, nodeName, ordinal]
+              description: >
+                Stable identity only, declared by the owning ProxmoxCluster.
+                All tunables live on ProxmoxCluster.spec. These fields are
+                immutable because they identify which node this object projects.
+              properties:
+                clusterRef:
+                  type: string
+                  minLength: 1
+                  description: Name of the owning ProxmoxCluster in this namespace.
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterRef is immutable
+                nodeName:
+                  type: string
+                  minLength: 1
+                  description: >
+                    Proxmox node name, equal to the StatefulSet pod name.
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: nodeName is immutable
+                ordinal:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  description: >
+                    StatefulSet ordinal index (0-based). Node 0 is the cluster
+                    bootstrap leader.
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: ordinal is immutable
+            status:
+              type: object
+              description: Observed state. Re-derived each reconcile; nothing here is authoritative.
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Starting, Joining, Ready, Offline, Failed]
+                  description: >
+                    Pending  — pod not yet Running.
+                    Starting — pod Running, PVE services still coming up.
+                    Joining  — PVE up but not yet a Corosync member.
+                    Ready    — Corosync member and online.
+                    Offline  — known to the cluster but not currently reachable.
+                    Failed   — pod failed or exited unexpectedly.
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [lastTransitionTime, message, reason, status, type]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                inCluster:
+                  type: boolean
+                  description: True when this node appears as a member in `pvecm nodes`.
+                online:
+                  type: boolean
+                  description: True when Proxmox currently considers the node reachable.
+                corosyncNodeID:
+                  type: integer
+                  format: int32
+                  description: Corosync nodeid assigned to this node (1-based).
+                podName:
+                  type: string
+                podIP:
+                  type: string
+                  description: Pod address — also the Corosync ring0 address.
+                kubernetesNode:
+                  type: string
+                  description: >
+                    Cluster node the pod is scheduled on. Useful for confirming
+                    PVE nodes are spread across distinct failure domains.
+                ceph:
+                  type: object
+                  description: >
+                    This node's role in the Ceph cluster. Absent when Ceph is
+                    not enabled on the owning ProxmoxCluster.
+                  properties:
+                    monitor:
+                      type: boolean
+                      description: A Ceph Monitor runs on this node.
+                    manager:
+                      type: boolean
+                      description: A Ceph Manager runs on this node.
+                    osdsUp:
+                      type: integer
+                      format: int32
+                    osdsTotal:
+                      type: integer
+                      format: int32
+                    osdSummary:
+                      type: string
+                      description: '"up/expected" string for printer columns.'
+                    devices:
+                      type: array
+                      description: >
+                        Block devices attached to this node for OSD use. A
+                        device listed here while osdsTotal stays below the
+                        device count usually means the OSD PVC was provisioned
+                        with a filesystem StorageClass instead of
+                        volumeMode: Block.
+                      items:
+                        type: string
+                observedAt:
+                  type: string
+                  format: date-time
+                  description: >
+                    When the operator last recorded a change to this projection.
+                    Advances only when some other field also changed, so read it
+                    as "state last confirmed to differ at", not "last polled
+                    at". A stale value on a healthy cluster is expected; to
+                    monitor operator liveness watch the ProxmoxCluster or the
+                    operator's metrics instead.
