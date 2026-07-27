@@ -233,13 +233,15 @@ COPY config/datacenter.cfg /usr/share/multiprox/datacenter.cfg
 RUN mkdir -p /etc/pve && rm -rf /etc/pve/* /etc/pve/.[!.]* 2>/dev/null || true
 
 # ── Scripts ───────────────────────────────────────────────────────────────────
-COPY scripts/entrypoint.sh   /usr/local/bin/entrypoint.sh
-COPY scripts/cluster-init.sh /usr/local/bin/cluster-init
-COPY scripts/cluster-join.sh /usr/local/bin/cluster-join
+COPY scripts/entrypoint.sh      /usr/local/bin/entrypoint.sh
+COPY scripts/cluster-init.sh    /usr/local/bin/cluster-init
+COPY scripts/cluster-join.sh    /usr/local/bin/cluster-join
+COPY scripts/ceph-osd-create.sh /usr/local/bin/ceph-osd-create
 RUN chmod +x \
         /usr/local/bin/entrypoint.sh \
         /usr/local/bin/cluster-init \
-        /usr/local/bin/cluster-join
+        /usr/local/bin/cluster-join \
+        /usr/local/bin/ceph-osd-create
 
 # ── Persistent volumes ────────────────────────────────────────────────────────
 # /etc/pve        → cluster filesystem (pmxcfs, managed by pve-cluster)

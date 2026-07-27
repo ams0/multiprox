@@ -1,0 +1,57 @@
+##############################################################################
+# Ceph overlay — attaches one raw block device per node for a Ceph OSD.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ceph.yml up -d
+#
+# Then, once the cluster is quorate:
+#   make ceph-init      # pveceph init + mon + mgr on every node
+#   make ceph-osd       # pveceph osd create on each attached device
+#   make ceph-pool      # create the pool and register it as PVE storage
+#
+##############################################################################
+# ⚠  READ THIS BEFORE SETTING THE DEVICE VARIABLES
+#
+# Point these at DEDICATED, EMPTY disks. `pveceph osd create` destroys whatever
+# is on the device it is given — there is no confirmation prompt.
+#
+# ALWAYS use /dev/disk/by-id/... rather than /dev/sdX. Kernel device names are
+# assigned in discovery order and are NOT stable across reboots. This is not
+# theoretical: on the machine these were developed against, a single VM restart
+# rotated the names so that the OS disk moved from /dev/sda to /dev/sdd — the
+# exact slot a data disk had occupied before. Had the compose file said
+# /dev/sdd, the next `pveceph osd create` would have wiped the running system.
+#
+# Identify your disks first:
+#
+#   lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT
+#   findmnt -no SOURCE /                       # the disk to never touch
+#   ls -l /dev/disk/by-id/ | grep -v part
+#
+# Then set in .env:
+#
+#   PVE1_OSD_DEVICE=/dev/disk/by-id/scsi-...aaa
+#   PVE2_OSD_DEVICE=/dev/disk/by-id/scsi-...bbb
+#   PVE3_OSD_DEVICE=/dev/disk/by-id/scsi-...ccc
+#
+# Each is exposed inside its container as /dev/ceph-osd-0, so the node-side
+# tooling sees a stable name regardless of what the host calls it.
+##############################################################################
+
+services:
+
+  pve1:
+    devices:
+      # `devices` REPLACES the base list rather than merging, so /dev/fuse has
+      # to be repeated here or pmxcfs loses it and pve-cluster fails to start.
+      - /dev/fuse:/dev/fuse
+      - ${PVE1_OSD_DEVICE:?set PVE1_OSD_DEVICE in .env - see the warning in this file}:/dev/ceph-osd-0
+
+  pve2:
+    devices:
+      - /dev/fuse:/dev/fuse
+      - ${PVE2_OSD_DEVICE:?set PVE2_OSD_DEVICE in .env - see the warning in this file}:/dev/ceph-osd-0
+
+  pve3:
+    devices:
+      - /dev/fuse:/dev/fuse
+      - ${PVE3_OSD_DEVICE:?set PVE3_OSD_DEVICE in .env - see the warning in this file}:/dev/ceph-osd-0

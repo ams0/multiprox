@@ -133,7 +133,18 @@ services:
       - "${PVE1_UI_PORT:-8006}:8006"
       - "${PVE1_SSH_PORT:-22201}:22"
     volumes:
+      # ceph-volume (used by `pveceph osd create`) reads device
+      # properties from the udev database via pyudev. There is no udevd
+      # in the container, so without the host's database it fails with:
+      #   RuntimeError: No udev data could be retrieved for /sys/block/sdX
+      # Read-only: we consume the host's data, never write to it.
+      - /run/udev:/run/udev:ro
       - pve1-cluster:/var/lib/pve-cluster
+      # Ceph mon/mgr/OSD state. Same trap as /etc/corosync: `pveceph mon
+      # create` writes here, but it is on the container filesystem, so
+      # recreating a container destroys the monitors and the cluster
+      # becomes unreachable (monclient(hunting): authenticate timed out).
+      - pve1-ceph:/var/lib/ceph
       - pve1-corosync:/etc/corosync
       - pve1-storage:/var/lib/vz
       - pve1-logs:/var/log/pve
@@ -157,7 +168,18 @@ services:
       - "${PVE2_UI_PORT:-8007}:8006"
       - "${PVE2_SSH_PORT:-22202}:22"
     volumes:
+      # ceph-volume (used by `pveceph osd create`) reads device
+      # properties from the udev database via pyudev. There is no udevd
+      # in the container, so without the host's database it fails with:
+      #   RuntimeError: No udev data could be retrieved for /sys/block/sdX
+      # Read-only: we consume the host's data, never write to it.
+      - /run/udev:/run/udev:ro
       - pve2-cluster:/var/lib/pve-cluster
+      # Ceph mon/mgr/OSD state. Same trap as /etc/corosync: `pveceph mon
+      # create` writes here, but it is on the container filesystem, so
+      # recreating a container destroys the monitors and the cluster
+      # becomes unreachable (monclient(hunting): authenticate timed out).
+      - pve2-ceph:/var/lib/ceph
       - pve2-corosync:/etc/corosync
       - pve2-storage:/var/lib/vz
       - pve2-logs:/var/log/pve
@@ -183,7 +205,18 @@ services:
       - "${PVE3_UI_PORT:-8008}:8006"
       - "${PVE3_SSH_PORT:-22203}:22"
     volumes:
+      # ceph-volume (used by `pveceph osd create`) reads device
+      # properties from the udev database via pyudev. There is no udevd
+      # in the container, so without the host's database it fails with:
+      #   RuntimeError: No udev data could be retrieved for /sys/block/sdX
+      # Read-only: we consume the host's data, never write to it.
+      - /run/udev:/run/udev:ro
       - pve3-cluster:/var/lib/pve-cluster
+      # Ceph mon/mgr/OSD state. Same trap as /etc/corosync: `pveceph mon
+      # create` writes here, but it is on the container filesystem, so
+      # recreating a container destroys the monitors and the cluster
+      # becomes unreachable (monclient(hunting): authenticate timed out).
+      - pve3-ceph:/var/lib/ceph
       - pve3-corosync:/etc/corosync
       - pve3-storage:/var/lib/vz
       - pve3-logs:/var/log/pve
@@ -237,14 +270,17 @@ networks:
 
 volumes:
   pve1-cluster:
+  pve1-ceph:
   pve1-corosync:
   pve1-storage:
   pve1-logs:
   pve2-cluster:
+  pve2-ceph:
   pve2-corosync:
   pve2-storage:
   pve2-logs:
   pve3-cluster:
+  pve3-ceph:
   pve3-corosync:
   pve3-storage:
   pve3-logs:

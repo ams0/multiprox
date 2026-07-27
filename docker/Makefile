@@ -73,6 +73,54 @@ cluster-full: cluster-init cluster-join
 	@echo "==> Cluster fully formed. Status:"
 	$(COMPOSE) exec pve1 pvecm status
 
+# ── Ceph ──────────────────────────────────────────────────────────────────────
+# Requires the ceph overlay and PVE*_OSD_DEVICE set in .env:
+#   docker compose -f docker-compose.yml -f docker-compose.ceph.yml up -d
+# See docker-compose.ceph.yml for the disk-selection warning.
+
+COMPOSE_CEPH := docker compose -f docker-compose.yml -f docker-compose.ceph.yml
+
+.PHONY: ceph-up ceph-init ceph-osd ceph-pool ceph-status ceph-full
+
+ceph-up:
+	$(COMPOSE_CEPH) up -d
+
+# pveceph init + a mon/mgr on every node.
+ceph-init:
+	$(COMPOSE_CEPH) exec -T pve1 pveceph init --network $(CEPH_NETWORK)
+	@for n in 1 2 3; do \
+	  echo "==> mon/mgr on pve$$n"; \
+	  $(COMPOSE_CEPH) exec -T pve$$n pveceph mon create || true; \
+	done
+
+# One OSD per node from the mapped device. ceph-osd-create resolves the mapped
+# path to the kernel name Proxmox needs, and refuses mounted devices.
+ceph-osd:
+	@for n in 1 2 3; do \
+	  echo "==> OSD on pve$$n"; \
+	  $(COMPOSE_CEPH) exec -T pve$$n ceph-osd-create; \
+	done
+
+ceph-pool:
+	$(COMPOSE_CEPH) exec -T pve1 pveceph pool create $(CEPH_POOL) \
+	  --size 3 --min_size 2 --add_storages 1
+	# PVE creates pools with pg_autoscale_mode=warn and a default pg_num of 128.
+	# On a small cluster that is too many, so Ceph sits at HEALTH_WARN
+	# ("POOL_TOO_MANY_PGS ... should have 32") and will not fix it itself.
+	# Turning the autoscaler on lets it converge to the right count.
+	$(COMPOSE_CEPH) exec -T pve1 ceph osd pool set $(CEPH_POOL) pg_autoscale_mode on
+
+ceph-status:
+	$(COMPOSE_CEPH) exec -T pve1 ceph -s
+	@echo ""
+	$(COMPOSE_CEPH) exec -T pve1 pvesm status
+
+# Everything, assuming the PVE cluster is already formed.
+ceph-full: ceph-init ceph-osd ceph-pool ceph-status
+
+CEPH_NETWORK ?= 10.10.0.0/24
+CEPH_POOL    ?= ceph-vm
+
 # ── Cluster inspection ────────────────────────────────────────────────────────
 
 status:
