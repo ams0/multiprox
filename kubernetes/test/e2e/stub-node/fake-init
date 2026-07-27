@@ -5,39 +5,35 @@
 #   exec /lib/systemd/systemd --system --unit=multi-user.target
 # so this process is what keeps the pod alive.
 #
-# It also serves a TCP listener on :22. The operator's cluster-join.sh waits for
-# `nc -z <node-0> 22` before invoking pvecm add, mirroring how a real pvecm add
-# exchanges cluster credentials over SSH. Without something accepting on 22 the
-# join step correctly declines to run, so the stub provides a minimal listener.
-# It speaks just enough to look like a reachable port; no SSH protocol is
-# implemented, and none is needed because the stub pvecm never dials out.
+# It starts a REAL sshd, because the operator's cluster-join.sh waits for TCP
+# :22 before invoking pvecm add — mirroring how a genuine pvecm add exchanges
+# cluster credentials over SSH.
+#
+# Deliberately a real sshd and not a netcat listener. The stub used to install
+# netcat, which the real Proxmox image does not have, and that difference hid a
+# real bug: the generated cluster-join.sh used `nc -z`, which failed with
+# command-not-found on every real node while passing in e2e. A stub must never
+# be more capable than the image it substitutes for.
 
 set -u
 
 log() { echo "[fake-init/$(hostname -s 2>/dev/null || hostname)] $*"; }
 
-# Accept and immediately close connections on :22, forever.
-listen_22() {
-  while true; do
-    # -l listen, -k keep accepting after each connection closes.
-    if nc -l -k -p 22 >/dev/null 2>&1; then
-      :
-    else
-      # Some netcat builds want -p omitted for listen mode.
-      nc -l -k 22 >/dev/null 2>&1 || sleep 1
-    fi
-  done
-}
+# sshd needs its privilege-separation directory and host keys. node-bootstrap.sh
+# normally runs ssh-keygen -A already; repeat it here so this works standalone.
+mkdir -p /run/sshd
+[ -f /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -A >/dev/null 2>&1
 
-listen_22 &
-LISTENER_PID=$!
-log "port 22 listener started (pid ${LISTENER_PID})"
+if /usr/sbin/sshd 2>/dev/null; then
+    log "sshd started on :22"
+else
+    log "WARNING: sshd failed to start; cluster-join will not be exercisable"
+fi
 
-# Reap the listener on termination so the pod stops promptly.
-trap 'kill "${LISTENER_PID}" 2>/dev/null; exit 0' TERM INT
+trap 'exit 0' TERM INT
 
 log "stub node up; sleeping as PID 1 stand-in"
 while true; do
-  sleep 3600 &
-  wait $!
+    sleep 3600 &
+    wait $!
 done

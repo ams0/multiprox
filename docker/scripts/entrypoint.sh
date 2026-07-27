@@ -53,11 +53,21 @@ if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
     ssh-keygen -A
 fi
 
-# ── PVE datacenter config ─────────────────────────────────────────────────────
-# /etc/pve is a FUSE mount (pmxcfs) — only available AFTER pve-cluster starts.
-# We pre-stage the default into /root so that cluster-init can copy it later.
-if [ -f /etc/pve/datacenter.cfg.default ] && [ ! -f /etc/pve/datacenter.cfg ]; then
-    cp /etc/pve/datacenter.cfg.default /etc/pve/datacenter.cfg 2>/dev/null || true
+# ── /etc/pve must be an EMPTY mountpoint ─────────────────────────────────────
+# pmxcfs mounts the cluster filesystem here via FUSE, and FUSE refuses a
+# non-empty mountpoint:
+#
+#   fuse: mountpoint is not empty
+#   [main] crit: fuse_mount error: File exists
+#
+# Nothing may be written here before pve-cluster starts. The datacenter
+# defaults live at /usr/share/multiprox/datacenter.cfg and are installed by
+# cluster-init.sh once the filesystem is mounted.
+if mountpoint -q /etc/pve 2>/dev/null; then
+    log "/etc/pve already mounted (container restart) — leaving it alone"
+elif [ -n "$(ls -A /etc/pve 2>/dev/null)" ]; then
+    log "WARNING: /etc/pve is not empty; pmxcfs cannot mount over it. Clearing."
+    rm -rf /etc/pve/* /etc/pve/.[!.]* 2>/dev/null || true
 fi
 
 # ── /dev/fuse (required by pmxcfs) ───────────────────────────────────────────

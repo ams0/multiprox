@@ -58,11 +58,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         iputils-ping \
         net-tools \
         openssh-server \
+        openssh-client \
         procps \
         psmisc \
         systemd \
         systemd-sysv \
         dbus \
+        sshpass \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Proxmox VE repository (no-subscription tier) ─────────────────────────────
@@ -213,7 +215,22 @@ RUN echo 'root:proxmox' | chpasswd
 COPY config/interfaces /etc/network/interfaces
 
 # ── PVE datacenter defaults ───────────────────────────────────────────────────
-COPY config/datacenter.cfg /etc/pve/datacenter.cfg.default
+# Staged OUTSIDE /etc/pve, deliberately.
+#
+# /etc/pve is where pmxcfs (the cluster filesystem) mounts itself via FUSE, and
+# FUSE refuses to mount over a non-empty directory:
+#
+#   fuse: mountpoint is not empty
+#   [main] crit: fuse_mount error: File exists
+#   pve-cluster.service: Failed with result 'exit-code'
+#
+# Putting anything in /etc/pve at image-build time therefore prevents the
+# cluster filesystem from ever starting, which in turn breaks every pvecm and
+# pveceph command. cluster-init.sh copies this into place after pmxcfs mounts.
+COPY config/datacenter.cfg /usr/share/multiprox/datacenter.cfg
+
+# /etc/pve must exist and be EMPTY — it is only ever a mountpoint.
+RUN mkdir -p /etc/pve && rm -rf /etc/pve/* /etc/pve/.[!.]* 2>/dev/null || true
 
 # ── Scripts ───────────────────────────────────────────────────────────────────
 COPY scripts/entrypoint.sh   /usr/local/bin/entrypoint.sh

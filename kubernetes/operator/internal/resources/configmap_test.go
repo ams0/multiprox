@@ -2,6 +2,7 @@ package resources
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -106,6 +107,61 @@ func TestConfigMap_ClusterInitCarriesClusterName(t *testing.T) {
 	// Idempotency guard: re-running must not try to recreate the cluster.
 	if !strings.Contains(cm.Data["cluster-init.sh"], "pvecm status") {
 		t.Error("cluster-init.sh lacks an idempotency guard on pvecm status")
+	}
+}
+
+// TestConfigMap_ScriptsOnlyUseToolsTheRealImageHas guards a bug that shipped:
+// cluster-join.sh gated on `nc -z <node-0> 22`, but netcat is NOT installed in
+// the Proxmox node image. Every iteration failed with command-not-found, so the
+// loop always timed out and reported node-0 unreachable while sshd was in fact
+// listening and answering.
+//
+// It passed e2e because the stub node image installed netcat — the stub was
+// more capable than the image it stood in for, which is exactly how this kind
+// of defect hides. The stub no longer installs it, and this test fails fast if
+// a generated script reaches for a binary the real image lacks.
+func TestConfigMap_ScriptsOnlyUseToolsTheRealImageHas(t *testing.T) {
+	// Binaries absent from docker/Dockerfile's package list. Add here when a
+	// script starts depending on something new, and add it to the image too.
+	absent := []string{"nc", "ncat", "netcat", "socat", "jq", "python3", "curl"}
+
+	cm, err := ConfigMap(testCluster(withCeph(2, 3, 2)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, body := range cm.Data {
+		if !strings.HasSuffix(name, ".sh") {
+			continue
+		}
+		for _, bin := range absent {
+			// Match the binary as a command word: start of line or after a
+			// pipe/semicolon/&&, so prose in comments does not trip it.
+			re := regexp.MustCompile(`(?m)(^|[|;&]|\$\()\s*` + regexp.QuoteMeta(bin) + `\s`)
+			// Strip comment lines before matching — the fix is documented in them.
+			var code []string
+			for _, line := range strings.Split(body, "\n") {
+				if t := strings.TrimSpace(line); !strings.HasPrefix(t, "#") {
+					code = append(code, line)
+				}
+			}
+			if re.MatchString(strings.Join(code, "\n")) {
+				t.Errorf("%s invokes %q, which is not installed in the PVE node image",
+					name, bin)
+			}
+		}
+	}
+}
+
+func TestConfigMap_ClusterJoinWaitsWithoutExternalTools(t *testing.T) {
+	cm, err := ConfigMap(testCluster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	join := cm.Data["cluster-join.sh"]
+	// bash's /dev/tcp needs no package and is how the wait must be done.
+	if !strings.Contains(join, "/dev/tcp/") {
+		t.Error("cluster-join.sh should test reachability with bash's /dev/tcp")
 	}
 }
 

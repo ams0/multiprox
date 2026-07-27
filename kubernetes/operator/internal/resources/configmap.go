@@ -184,9 +184,16 @@ for i in $(seq 1 30); do
   [ "$i" -eq 30 ] && { log "ERROR: pve-cluster never became active"; exit 1; }
 done
 
+# Uses bash's /dev/tcp, not nc. netcat is NOT installed in the real Proxmox node
+# image, so "nc -z" failed with command-not-found on every iteration and this
+# loop always timed out — reporting node-0 unreachable while sshd was listening
+# and answering. /dev/tcp is built into bash and needs no package.
 log "Waiting for SSH on ${NODE0}..."
 for i in $(seq 1 40); do
-  nc -z "${NODE0}" 22 2>/dev/null && break
+  if timeout 3 bash -c "echo > /dev/tcp/${NODE0}/22" 2>/dev/null; then
+    log "node-0 SSH is up."
+    break
+  fi
   sleep 3
   [ "$i" -eq 40 ] && { log "ERROR: SSH on ${NODE0} not reachable"; exit 1; }
 done

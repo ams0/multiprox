@@ -2,9 +2,12 @@
 # multiprox — 3-node Proxmox VE cluster (Docker)
 #
 # Default layout
-#   pve1  10.10.0.11   web UI → localhost:8006   SSH → localhost:2221
-#   pve2  10.10.0.12   web UI → localhost:8007   SSH → localhost:2222
-#   pve3  10.10.0.13   web UI → localhost:8008   SSH → localhost:2223
+#   pve1  10.10.0.11   web UI → localhost:8006   SSH → localhost:22201
+#   pve2  10.10.0.12   web UI → localhost:8007   SSH → localhost:22202
+#   pve3  10.10.0.13   web UI → localhost:8008   SSH → localhost:22203
+#
+# SSH host ports deliberately avoid 22xx: 2222 is a very common alternate SSH
+# port and collides with the host's own sshd on hardened boxes.
 #
 # To add more nodes copy a node block, bump the IP/ports, and add the new
 # service name to the depends_on list on pve2/pve3.
@@ -21,9 +24,19 @@ x-pve-common: &pve-common
   build:
     context: .
     dockerfile: Dockerfile
-    # Uncomment on Linux with KVM to enable qemu-server + pve-container:
-    # args:
-    #   ENABLE_KVM: "1"
+    args:
+      # Installs the Proxmox Ceph packages so `pveceph` works. Required for
+      # any Ceph testing; harmless (just larger) otherwise.
+      ENABLE_CEPH: "1"
+      # Uncomment on Linux with /dev/kvm for qemu-server + pve-container:
+      # ENABLE_KVM: "1"
+
+  # pmxcfs mounts the cluster filesystem at /etc/pve through FUSE, so the
+  # container needs /dev/fuse. Without it pve-cluster fails to start, /etc/pve
+  # is never populated, and every pvecm command fails with a confusing error
+  # about the cluster filesystem being unavailable.
+  devices:
+    - /dev/fuse:/dev/fuse
 
   # Privileged is required for:
   #   • systemd as PID 1
@@ -37,9 +50,43 @@ x-pve-common: &pve-common
     - /run:mode=755
     - /run/lock:mode=1777
 
-  # cgroup v2 hierarchy — read-only from the Docker host
-  volumes:
-    - /sys/fs/cgroup:/sys/fs/cgroup:ro
+  # ── cgroups: private namespace, and do NOT bind-mount the host hierarchy ────
+  # systemd as PID 1 must create its own /init.scope cgroup. It can only do that
+  # if the container has its own cgroup root, which is what cgroupns=private
+  # provides — Docker then sets up /sys/fs/cgroup inside the container itself.
+  #
+  # Bind-mounting the host's /sys/fs/cgroup on top of that SHADOWS the namespaced
+  # hierarchy and systemd dies immediately with:
+  #
+  #   Failed to create /init.scope control group: No such file or directory
+  #   Failed to allocate manager object.
+  #   Exiting PID 1...
+  #
+  # Measured on Docker 29 / cgroup v2:
+  #   cgroupns=private, no bind mount   -> systemd boots
+  #   cgroupns=private + bind mount     -> exit 255 (either ro or rw)
+  #   cgroupns=host    + bind mount rw  -> systemd boots
+  #
+  # The first is chosen: it needs no host paths and keeps the container's cgroup
+  # view isolated. The old `-v /sys/fs/cgroup:ro` line was cgroup-v1 advice that
+  # silently breaks under v2.
+  cgroup: private
+
+  # ── /dev/shm must be larger than Docker's 64 MB default ─────────────────────
+  # Corosync's IPC layer (libqb) allocates POSIX shared memory per client
+  # connection. At 64 MB it runs out as soon as a few nodes and CLI clients are
+  # active, and every pvecm/pvesh call then fails with:
+  #
+  #   [QB] couldn't allocate file /dev/shm/qb-.../qb-response-cfg-data:
+  #        No space left on device (28)
+  #   [QB] shm connection FAILED: No space left on device (28)
+  #   Cannot initialise CFG service
+  #
+  # The cluster itself stays quorate — membership is over the network — so this
+  # presents as "the cluster is fine but every command is broken", which is a
+  # confusing failure to diagnose. Proxmox on bare metal gets a /dev/shm sized
+  # at half of RAM, so it never hits this.
+  shm_size: 1gb
 
   # Corosync is latency-sensitive — keep nodes on an isolated bridge
   networks:
@@ -84,10 +131,10 @@ services:
         ipv4_address: 10.10.0.11
     ports:
       - "${PVE1_UI_PORT:-8006}:8006"
-      - "${PVE1_SSH_PORT:-2221}:22"
+      - "${PVE1_SSH_PORT:-22201}:22"
     volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - pve1-cluster:/var/lib/pve-cluster
+      - pve1-corosync:/etc/corosync
       - pve1-storage:/var/lib/vz
       - pve1-logs:/var/log/pve
 
@@ -108,10 +155,10 @@ services:
         ipv4_address: 10.10.0.12
     ports:
       - "${PVE2_UI_PORT:-8007}:8006"
-      - "${PVE2_SSH_PORT:-2222}:22"
+      - "${PVE2_SSH_PORT:-22202}:22"
     volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - pve2-cluster:/var/lib/pve-cluster
+      - pve2-corosync:/etc/corosync
       - pve2-storage:/var/lib/vz
       - pve2-logs:/var/log/pve
     depends_on:
@@ -134,10 +181,10 @@ services:
         ipv4_address: 10.10.0.13
     ports:
       - "${PVE3_UI_PORT:-8008}:8006"
-      - "${PVE3_SSH_PORT:-2223}:22"
+      - "${PVE3_SSH_PORT:-22203}:22"
     volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - pve3-cluster:/var/lib/pve-cluster
+      - pve3-corosync:/etc/corosync
       - pve3-storage:/var/lib/vz
       - pve3-logs:/var/log/pve
     depends_on:
@@ -174,15 +221,30 @@ networks:
 
 ##############################################################################
 # Volumes
+#
+# pveN-corosync (/etc/corosync) is NOT optional. `pvecm create` writes the
+# Corosync authkey there, and it lives on the container filesystem rather than
+# in pmxcfs. Without a volume it is lost whenever a container is recreated, and
+# corosync then refuses to start:
+#
+#   [MAIN] Could not open /etc/corosync/authkey: No such file or directory
+#   Corosync Cluster Engine exiting with status 8
+#
+# pve-cluster still starts, so the symptom is a cluster that looks half-alive:
+# /etc/pve is mounted but every pvecm command fails with "Cannot initialize
+# CMAP service". corosync.conf itself is safe — it lives in /etc/pve.
 ##############################################################################
 
 volumes:
   pve1-cluster:
+  pve1-corosync:
   pve1-storage:
   pve1-logs:
   pve2-cluster:
+  pve2-corosync:
   pve2-storage:
   pve2-logs:
   pve3-cluster:
+  pve3-corosync:
   pve3-storage:
   pve3-logs:

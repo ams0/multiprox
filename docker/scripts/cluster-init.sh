@@ -51,6 +51,45 @@ pvecm create "${CLUSTER_NAME}" \
     --votes 1
 
 log "Cluster created successfully."
+
+# ── Wait for quorum before writing anything into /etc/pve ────────────────────
+# pmxcfs is READ-ONLY until corosync establishes quorum. `pvecm create` returns
+# as soon as the config is written, well before corosync has formed membership,
+# so anything writing to /etc/pve immediately afterwards fails with a bare:
+#
+#   cp: cannot create regular file '/etc/pve/datacenter.cfg': Permission denied
+#
+# The same race breaks cluster-join: /root/.ssh/authorized_keys is a symlink
+# into /etc/pve/priv/, so ssh-copy-id from a joining node silently fails too.
+# Poll for WRITABILITY, not for quorum. `pvecm status` reports Quorate: Yes as
+# soon as corosync forms membership, but pmxcfs only flips to read-write once it
+# has processed the quorum change through its own CPG callback — measurably
+# later. Checking quorum and then writing still loses the race; the only
+# reliable signal is a write that succeeds.
+log "Waiting for the cluster filesystem to become writable..."
+WRITABLE=0
+for i in $(seq 1 45); do
+    if : > /etc/pve/.multiprox-write-probe 2>/dev/null; then
+        rm -f /etc/pve/.multiprox-write-probe 2>/dev/null
+        WRITABLE=1
+        log "/etc/pve writable after $((i * 2))s."
+        break
+    fi
+    sleep 2
+done
+[ "${WRITABLE}" -eq 1 ] || log "WARNING: /etc/pve still read-only after 90s."
+
+# Install datacenter defaults now that pmxcfs is mounted AND writable. This
+# cannot happen at image-build time: anything present in /etc/pve stops FUSE
+# from mounting there at all. pmxcfs replicates the file to every node.
+if [ -f /usr/share/multiprox/datacenter.cfg ] && [ ! -f /etc/pve/datacenter.cfg ]; then
+    if cp /usr/share/multiprox/datacenter.cfg /etc/pve/datacenter.cfg 2>/dev/null; then
+        log "Installed /etc/pve/datacenter.cfg"
+    else
+        log "WARNING: could not write /etc/pve/datacenter.cfg"
+    fi
+fi
+
 log ""
 pvecm status
 log ""

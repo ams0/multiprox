@@ -34,8 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         procps \
         iproute2 \
         iputils-ping \
-        netcat-openbsd \
-        openssh-client \
+        openssh-server \
         passwd \
         hostname \
         ca-certificates \
@@ -44,11 +43,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Fake init: node-bootstrap.sh ends with `exec /lib/systemd/systemd`, so this
 # is what keeps the container alive. Everything before that exec is the real script.
 #
-# It also opens a listener on :22. That is not cosmetic — the operator's real
-# cluster-join.sh gates on `nc -z <node-0> 22` before running pvecm add, because
-# a genuine pvecm add exchanges credentials over SSH. Without a listener the
-# join step correctly refuses to proceed, so the stub has to provide one for the
-# join path to be exercisable at all.
+# It also starts a REAL sshd. cluster-join.sh gates on TCP :22 before running
+# pvecm add, because a genuine pvecm add exchanges credentials over SSH.
+#
+# A real sshd is used rather than a fake netcat listener on purpose. The stub
+# previously installed netcat, which the real Proxmox image does NOT have — and
+# that difference hid a genuine bug: the generated cluster-join.sh used `nc -z`,
+# which failed with command-not-found on every real node while passing in e2e.
+# The stub must never be more capable than the image it stands in for.
 COPY fake-init /lib/systemd/systemd
 RUN chmod +x /lib/systemd/systemd
 
