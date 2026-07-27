@@ -35,6 +35,42 @@ reset binds `[::]` only, and every IPv4 connection is refused — which looks li
 a firewall problem but is not. Do **not** list `0.0.0.0:22` and `[::]:22`
 separately either; they collide and `ssh.socket` fails to start.
 
+### There are TWO NSGs — rules must exist in both
+
+This costs an hour if you miss it. Traffic has to be permitted by the **subnet**
+NSG *and* the **NIC** NSG; an allow in only one is a deny.
+
+| NSG | Attached to |
+|---|---|
+| `multiprox-x86NSG` | the NIC (created by `az vm create`) |
+| `multiprox-x86VNET-multiprox-x86Subnet-nsg-swedencentral` | the **subnet** (created by governance, *after* the VM) |
+
+The subnet NSG did not exist when the VM was created — `az network vnet subnet
+list` reported `None`. Governance added it later with **zero rules**, so
+`DenyAllInBound` took effect and SSH died mid-session with nothing on our side
+having changed. The NIC NSG still showed a correct ALLOW, which makes this look
+like anything but a firewall problem.
+
+Check both, and note that `list-effective-nsg` returns one entry **per NSG** —
+if you see two blocks of rules, that is two NSGs, not duplicated output:
+
+```bash
+NIC=$(az vm show -g rg-multiprox -n multiprox-x86 \
+        --query "networkProfile.networkInterfaces[0].id" -o tsv)
+az network nic list-effective-nsg --ids "$NIC" \
+  --query "value[].{nsg:networkSecurityGroup.id, rules:effectiveSecurityRules[?access=='Allow' && direction=='Inbound'].name}"
+```
+
+To add a rule to the subnet NSG:
+
+```bash
+az network nsg rule create -g rg-multiprox \
+  --nsg-name multiprox-x86VNET-multiprox-x86Subnet-nsg-swedencentral \
+  -n allow-ssh-2222 --priority 1100 --direction Inbound --access Allow \
+  --protocol Tcp --source-address-prefixes "$(curl -s -4 ifconfig.me)/32" \
+  --destination-port-ranges 2222
+```
+
 ### Locked out?
 
 `az vm run-command` reaches the VM through the Azure agent with no inbound

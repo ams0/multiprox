@@ -17,20 +17,30 @@
 #   Uncomment the QEMU/LXC block below and set ENABLE_KVM=1 in .env
 ############################################################################
 
-# NOT debian:bookworm-slim. The slim variant ships
+# ── Base image: the Debian suite decides which Proxmox you get ───────────────
+# Proxmox builds its packages per Debian release, so this single line selects
+# the entire stack:
+#
+#   bookworm -> PVE 8.4.x, Ceph reef 18.x / squid 19.x
+#   trixie   -> PVE 9.2.x, Ceph squid 19.x / tentacle 20.x   <- current
+#
+# ceph-tentacle is published for trixie ONLY, so latest Ceph requires trixie.
+# Changing this line means changing the PVE repo suite and the release key
+# below to match — they are a set.
+#
+# NOT the -slim variant. Slim ships
 #   /etc/dpkg/dpkg.cfg.d/docker  ->  path-exclude /usr/share/doc/*
 # and pve-manager keeps a *data* file there — /usr/share/doc/pve-manager/aplinfo.dat,
-# the appliance-template index. dpkg discards it at unpack, and the postinst then
-# dies on:
+# the appliance-template index. dpkg discards it at unpack and the postinst dies:
 #
 #   cp: cannot stat '/usr/share/doc/pve-manager/aplinfo.dat': No such file or directory
 #   dpkg: error processing package pve-manager (--configure)
 #
-# The whole install aborts. A targeted `path-include` for that one directory would
-# also work, but Proxmox assumes an ordinary Debian across ~350 packages and many
-# postinst scripts, and slim strips man pages and locales too — so the full base is
-# the safer bet. It costs roughly 100 MB on an image that is already ~2 GB.
-FROM debian:bookworm
+# The whole install aborts. A targeted `path-include` would also work, but
+# Proxmox assumes an ordinary Debian across ~350 packages and many postinst
+# scripts, and slim strips man pages and locales too — the full base is safer.
+# It costs roughly 100 MB on an image that is already ~2 GB.
+FROM debian:trixie
 
 LABEL org.opencontainers.image.title="multiprox node" \
       org.opencontainers.image.description="Proxmox VE cluster node (containerised)" \
@@ -56,9 +66,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Proxmox VE repository (no-subscription tier) ─────────────────────────────
-RUN wget -qO /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg \
-        https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg \
-    && echo "deb [arch=amd64] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
+# The release key is published per suite, so it tracks the base image above.
+RUN wget -qO /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg \
+        https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg \
+    && echo "deb [arch=amd64] http://download.proxmox.com/debian/pve trixie pve-no-subscription" \
          > /etc/apt/sources.list.d/pve.list \
     && apt-get update
 
@@ -111,7 +122,7 @@ RUN grep -rlZ 'enterprise\.proxmox\.com' /etc/apt/sources.list.d/ 2>/dev/null \
 # gdisk/parted let ceph-volume zap and re-label devices on re-use.
 ARG ENABLE_CEPH=0
 RUN if [ "$ENABLE_CEPH" = "1" ]; then \
-      echo "deb [arch=amd64] http://download.proxmox.com/debian/ceph-reef bookworm no-subscription" \
+      echo "deb [arch=amd64] http://download.proxmox.com/debian/ceph-tentacle trixie no-subscription" \
         > /etc/apt/sources.list.d/ceph.list \
       && apt-get update \
       && apt-get install -y --no-install-recommends \
