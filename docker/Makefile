@@ -48,6 +48,25 @@
 #
 # Order matters in one place: ceph-devices must run before up, or the nodes
 # start without their OSD devices and have to be recreated.
+#
+# ── Creating an LXC guest ────────────────────────────────────────────────────
+#
+#     docker exec multiprox-pve1 pveam update
+#     docker exec multiprox-pve1 pveam download cephfs \
+#         opensuse-16.0-default_20260116_amd64.tar.xz
+#     docker exec multiprox-pve1 pct create 102 \
+#         cephfs:vztmpl/opensuse-16.0-default_20260116_amd64.tar.xz \
+#         --hostname suse1 --rootfs ceph-vm:8 --cores 1 --memory 512 --swap 0 \
+#         --net0 name=eth0,bridge=vmbr0,ip=10.20.0.100/24,gw=10.20.0.1 \
+#         --nameserver 1.1.1.1 --password proxmox --unprivileged 1
+#
+#     # Required for every guest, and there is no pct option for it: LXC cannot
+#     # load an AppArmor profile from inside a container, so the start fails with
+#     # "Failed to run apparmor_parser ... Failed to initialize LSM".
+#     docker exec multiprox-pve1 sh -c \
+#         "echo 'lxc.apparmor.profile: unconfined' >> /etc/pve/lxc/102.conf"
+#
+#     docker exec multiprox-pve1 pct start 102
 ##############################################################################
 
 PROJECT  := multiprox
@@ -136,6 +155,16 @@ MON_NODES ?= 3
 # maps them in. Needs root for losetup. Re-run after a host reboot — loop
 # devices do not survive one.
 ceph-devices:
+	@echo "==> loading the rbd kernel module on the host"
+	# krbd is a HOST kernel facility and the nodes cannot supply it: a container
+	# has no modules of its own, so `rbd map` inside one just fails with
+	#   rbd: sysfs write failed / rbd: map failed: (2) No such file or directory
+	# because /sys/bus/rbd does not exist. LXC guests need it — their rootfs must
+	# be a real block device — and it is easy to miss, because libceph gets
+	# loaded anyway by the CephFS client, so lsmod looks reassuring.
+	sudo modprobe rbd
+	# Survive a host reboot; loop devices do not, but this costs nothing.
+	echo rbd | sudo tee /etc/modules-load.d/multiprox-rbd.conf >/dev/null
 	sudo ./scripts/setup-loop-osds.sh $(NODES) $(OSD_PER_NODE) $(OSD_SIZE)
 	./scripts/gen-ceph.sh $(NODES) $(OSD_PER_NODE) > $(CEPH_FILE)
 	@echo "Generated $(CEPH_FILE): $(NODES) x $(OSD_PER_NODE) = $$(( $(NODES) * $(OSD_PER_NODE) )) OSDs."
