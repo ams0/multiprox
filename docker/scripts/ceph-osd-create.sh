@@ -212,6 +212,32 @@ if [ "${FENCE_ONLY}" -eq 1 ]; then
     exit 0
 fi
 
+##############################################################################
+# Link the cluster config into /etc/ceph.
+#
+# The real config lives in pmxcfs at /etc/pve/ceph.conf and is replicated to
+# every node, but ceph-volume and the ceph CLI read /etc/ceph/ceph.conf. On
+# Proxmox that path is a symlink, created as a side effect of `pveceph init` or
+# `pveceph mon create` — so it exists only on nodes that ran one of those.
+#
+# Monitors therefore work and every other node fails:
+#
+#   -->  RuntimeError: No valid ceph configuration file was loaded.
+#
+# On an 11-node cluster with 3 monitors that is 9 OSDs created and 24 refused,
+# with the make target reporting success. The symlinks are what pveceph would
+# have made; creating them here means a node needs nothing but cluster
+# membership to host an OSD.
+##############################################################################
+mkdir -p /etc/ceph
+if [ ! -e /etc/ceph/ceph.conf ]; then
+    ln -sf /etc/pve/ceph.conf /etc/ceph/ceph.conf
+    log "linked /etc/ceph/ceph.conf -> /etc/pve/ceph.conf"
+fi
+if [ ! -e /etc/ceph/ceph.client.admin.keyring ]; then
+    ln -sf /etc/pve/priv/ceph.client.admin.keyring /etc/ceph/ceph.client.admin.keyring
+fi
+
 # ceph-volume authenticates as client.bootstrap-osd. pveceph would mint this on
 # demand; calling ceph-volume directly, we have to stage it ourselves. The
 # cluster-wide copy lives in pmxcfs (replicated to every node by pve-cluster),

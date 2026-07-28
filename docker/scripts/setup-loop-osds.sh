@@ -79,9 +79,24 @@ for n in $(seq 1 "$NODES"); do
     done
 done
 
+# The summaries below are truncated with `awk NR<=6`, never `| head -6`.
+#
+# head exits as soon as it has its six lines and closes the pipe; the loop
+# upstream is then killed by SIGPIPE, and `set -o pipefail` turns that into an
+# exit status of 141 for the whole script. The loop devices were created
+# perfectly and the script still failed, which broke the make chain:
+#
+#   make: *** [Makefile:139: ceph-devices] Error 141
+#
+# awk reads its input to the end and simply stops printing, so there is no
+# early close and no signal.
 echo "==> attached; symlinks under ${LINKDIR}:"
-ls -l "$LINKDIR" | tail -n +2 | awk '{printf "    %s -> %s\n", $9, $11}' | head -6
-[ "$TOTAL" -gt 6 ] && echo "    ... ($TOTAL total)"
+ls -l "$LINKDIR" | tail -n +2 | awk 'NR<=6 {printf "    %s -> %s\n", $9, $11}'
+# `[ ... ] && echo` would return 1 when the test is false, and under `set -e`
+# that ends the script on the very last line.
+if [ "$TOTAL" -gt 6 ]; then
+    echo "    ... ($TOTAL total)"
+fi
 
 echo ""
 echo "==> add to docker/.env:"
@@ -89,7 +104,7 @@ for n in $(seq 1 "$NODES"); do
     for i in $(seq 0 $(( PER_NODE - 1 ))); do
         echo "PVE${n}_OSD_DEVICE_${i}=${LINKDIR}/osd-${n}-${i}"
     done
-done | head -6
+done | awk 'NR<=6'
 echo "# ... (generated in full by scripts/gen-ceph.sh)"
 
 cat <<'NOTE'
