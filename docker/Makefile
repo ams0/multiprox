@@ -6,6 +6,7 @@
 #   up             Start all nodes in the background
 #   down           Stop and remove containers (volumes preserved)
 #   clean          Stop + remove containers AND named volumes
+#   force-clean    Tear down a wedged cluster without waiting (see note below)
 #
 #   wait           Block until every node's healthcheck passes
 #   cluster-init   Create the cluster on pve1 (run once after 'make up')
@@ -114,12 +115,78 @@ up:
 	@echo "    pve2 → https://localhost:8007"
 	@echo "    pve3 → https://localhost:8008"
 
-down:
+# ── Ordered shutdown ─────────────────────────────────────────────────────────
+# Guests and their RBD devices MUST be unwound before the OSDs serving them go
+# away. Stop the containers first and the ordering inverts: a guest rootfs is
+# still mounted on /dev/rbdN whose OSDs have just been killed, so that I/O can
+# never complete. The ext4 thread for it wedges in uninterruptible D-state,
+# which means the container holding it cannot be stopped either:
+#
+#   ✘ Container multiprox-pve3  Error while Stopping
+#   Error response from daemon: cannot stop container: ...
+#     tried to kill container, but did not receive an exit event
+#
+# There is no recovery from that short of rebooting the host — even
+# `rbd unmap -o force` blocks, because the unmap itself needs the I/O to drain.
+# So `down` and `clean` always run this first.
+stop-guests:
+	@echo "==> stopping guests and unmapping RBD devices"
+	@for n in $$(seq 1 $(NODES)); do \
+	  docker inspect -f . multiprox-pve$$n >/dev/null 2>&1 || continue; \
+	  ids=$$(timeout 30 docker exec multiprox-pve$$n pct list 2>/dev/null | awk 'NR>1 {print $$1}'); \
+	  for id in $$ids; do \
+	    echo "    pve$$n: stopping CT $$id"; \
+	    timeout 90 docker exec multiprox-pve$$n pct stop $$id --skiplock >/dev/null 2>&1 || true; \
+	  done; \
+	done
+	@# Unmap while the OSDs are still up, so the unmap can actually complete.
+	@for n in $$(seq 1 $(NODES)); do \
+	  docker inspect -f . multiprox-pve$$n >/dev/null 2>&1 || continue; \
+	  timeout 60 docker exec multiprox-pve$$n sh -c \
+	    'for d in /dev/rbd[0-9]*; do [ -b "$$d" ] && rbd unmap "$$d" 2>/dev/null; done; true' >/dev/null 2>&1 || true; \
+	done
+	@echo "    done"
+
+down: stop-guests
 	$(COMPOSE) down
 
-clean:
+clean: stop-guests
 	$(COMPOSE) down -v --remove-orphans
 	@echo "Volumes removed. Run 'make build && make up' to start fresh."
+
+# ── Escape hatch ─────────────────────────────────────────────────────────────
+# For when it is ALREADY wedged and `clean` cannot stop the containers. Never
+# blocks: every step that can hang in the kernel is given a timeout and its
+# failure ignored, so this always runs to the end and tells you what is left.
+#
+# It cannot unwedge a hung krbd device — nothing in userspace can. If any
+# D-state task survives, the host needs a reboot, and this says so rather than
+# leaving you to discover it.
+.PHONY: force-clean stop-guests
+force-clean:
+	@echo "==> force-clean: this does NOT wait for anything to shut down cleanly"
+	-@$(MAKE) --no-print-directory stop-guests NODES=$(NODES) 2>/dev/null || true
+	@echo "==> killing containers"
+	-@ids=$$(docker ps -aq --filter 'name=multiprox-pve'); \
+	  [ -n "$$ids" ] && docker rm -f $$ids >/dev/null 2>&1 || true
+	@echo "==> removing project volumes"
+	-@vols=$$(docker volume ls -q | grep -E '(^|_)pve[0-9]+-(cluster|ceph|corosync|storage|logs)$$'); \
+	  [ -n "$$vols" ] && docker volume rm $$vols >/dev/null 2>&1 || true
+	@echo "==> removing networks"
+	-@docker network rm multiprox_guest-net >/dev/null 2>&1 || true
+	-@docker network rm docker_proxmox-net  >/dev/null 2>&1 || true
+	@$(MAKE) --no-print-directory ceph-devices-clean 2>/dev/null || true
+	@echo ""
+	@stuck=$$(ps -eo stat --no-headers | grep -c '^D' || true); \
+	  if [ "$$stuck" -gt 0 ]; then \
+	    echo "  WARNING: $$stuck task(s) still in uninterruptible D-state."; \
+	    echo "  A wedged krbd device cannot be cleared from userspace — reboot the host:"; \
+	    echo "      sudo reboot"; \
+	    echo "  Then: make ceph-devices NODES=$(NODES) && make up NODES=$(NODES)"; \
+	  else \
+	    echo "  clean — nothing stuck. Rebuild with:"; \
+	    echo "      make build && make scale NODES=$(NODES) && make ceph-devices NODES=$(NODES) && make up NODES=$(NODES)"; \
+	  fi
 
 # ── Cluster lifecycle ─────────────────────────────────────────────────────────
 
