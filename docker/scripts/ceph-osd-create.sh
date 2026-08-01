@@ -207,11 +207,6 @@ dmsetup mknodes >/dev/null 2>&1 || true
 rm -rf /run/lvm/cache /etc/lvm/cache 2>/dev/null || true
 pvscan --cache >/dev/null 2>&1 || true
 
-if [ "${FENCE_ONLY}" -eq 1 ]; then
-    log "fence-only: LVM view and /dev/mapper nodes prepared, creating nothing."
-    exit 0
-fi
-
 ##############################################################################
 # Link the cluster config into /etc/ceph.
 #
@@ -236,6 +231,11 @@ if [ ! -e /etc/ceph/ceph.conf ]; then
 fi
 if [ ! -e /etc/ceph/ceph.client.admin.keyring ]; then
     ln -sf /etc/pve/priv/ceph.client.admin.keyring /etc/ceph/ceph.client.admin.keyring
+fi
+
+if [ "${FENCE_ONLY}" -eq 1 ]; then
+    log "fence-only: LVM view and /dev/mapper nodes prepared, creating nothing."
+    exit 0
 fi
 
 # ceph-volume authenticates as client.bootstrap-osd. pveceph would mint this on

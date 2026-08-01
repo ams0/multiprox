@@ -347,13 +347,36 @@ COPY scripts/cluster-join.sh    /usr/local/bin/cluster-join
 COPY scripts/ceph-osd-create.sh /usr/local/bin/ceph-osd-create
 COPY scripts/setup-bridge.sh    /usr/local/bin/setup-bridge
 COPY scripts/ceph-fs-create.sh  /usr/local/bin/ceph-fs-create
+COPY scripts/ceph-reattach.sh   /usr/local/bin/ceph-reattach
 RUN chmod +x \
         /usr/local/bin/entrypoint.sh \
         /usr/local/bin/cluster-init \
         /usr/local/bin/cluster-join \
         /usr/local/bin/ceph-osd-create \
         /usr/local/bin/setup-bridge \
-        /usr/local/bin/ceph-fs-create
+        /usr/local/bin/ceph-fs-create \
+        /usr/local/bin/ceph-reattach
+
+# ── Restart the node's Ceph daemons after a container recreate ───────────────
+# /var/lib/ceph is a volume so the DATA survives, but the systemd units that
+# `pveceph mon create` and `ceph-volume` enable are symlinks under
+# /etc/systemd/system — container filesystem, gone on recreate. The node comes
+# back quorate with every monitor and OSD intact and none of them running.
+RUN printf '%s\n' \
+    '[Unit]' \
+    'Description=multiprox: restart Ceph daemons whose unit enablement was lost' \
+    'After=pve-cluster.service network-online.target' \
+    'Wants=pve-cluster.service' \
+    '' \
+    '[Service]' \
+    'Type=oneshot' \
+    'RemainAfterExit=yes' \
+    'ExecStart=/usr/local/bin/ceph-reattach' \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target' \
+    > /etc/systemd/system/multiprox-ceph-reattach.service \
+    && systemctl enable multiprox-ceph-reattach.service 2>/dev/null || true
 
 # ── Persistent volumes ────────────────────────────────────────────────────────
 # /etc/pve        → cluster filesystem (pmxcfs, managed by pve-cluster)
