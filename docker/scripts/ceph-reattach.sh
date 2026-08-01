@@ -112,6 +112,13 @@ done
 # that reason — or this scans other nodes' volume groups and fails.
 ##############################################################################
 if [ -d /var/lib/ceph/osd ] || ls /dev/ceph-osd-* >/dev/null 2>&1; then
+    # Rebuild the device nodes first. LVM may only have activated these volumes
+    # after the entrypoint ran, and ceph-volume activates by the /dev/<vg>/<lv>
+    # path recorded in the LVM tags — absent without this, since LVM's udev
+    # rules are disabled in the container.
+    dmsetup mknodes >/dev/null 2>&1 || true
+    vgmknodes >/dev/null 2>&1 || true
+
     log "activating OSDs..."
     if ceph-volume lvm activate --all 2>&1 | grep -E '^(-->|Running command: /usr/bin/systemctl start)' | tail -5; then
         :

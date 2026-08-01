@@ -202,6 +202,18 @@ log "LVM fenced to this node's devices: ${REAL_DEVS[*]}"
 # ceph-volume's scan does not trip over another node's OSD volumes.
 dmsetup mknodes >/dev/null 2>&1 || true
 
+# ...and the /dev/<vg>/<lv> symlink tree on top of them. dmsetup only creates
+# /dev/mapper/<vg>-<lv>; the per-VG directory is normally built by LVM's udev
+# rules, which are disabled here. ceph-volume records the /dev/<vg>/<lv> form
+# in the OSD's LVM tags and uses it verbatim on activation, so without this an
+# OSD that exists and whose LV is active still cannot be started:
+#
+#   failed to read label for /dev/ceph-<vg>/osd-block-<uuid>
+#   bdev ... open stat got: (1) Operation not permitted
+#
+# Every OSD on the node fails that way after a container recreate.
+vgmknodes >/dev/null 2>&1 || true
+
 # Drop any cached scan of the devices we just excluded, or LVM keeps answering
 # from the stale view for the rest of this run.
 rm -rf /run/lvm/cache /etc/lvm/cache 2>/dev/null || true
