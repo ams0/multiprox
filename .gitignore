@@ -4,9 +4,20 @@
 docker/.env
 
 # ── Generated / build artifacts ────────────────────────────────────────────────
-# Produced by `make scale N=<n>` in docker/
+# Produced by `make scale NODES=<n>` in docker/
 docker-compose.scale.yml
 docker/docker-compose.scale.yml
+
+# Produced by `make ceph-devices NODES=<n>` in docker/.
+# This one WAS committed, from before gen-ceph.sh existed, and the tracked copy
+# still described the old physical-disk layout. Any `git pull` or `git reset`
+# therefore replaced the generated 33-device overlay with a stale file pointing
+# at /dev/disk/by-id/... paths for disks that no longer exist, and every node
+# then refused to start:
+#   error gathering device information while adding custom device
+#   "/dev/disk/by-id/scsi-14d5346...": no such file or directory
+docker-compose.ceph.yml
+docker/docker-compose.ceph.yml
 
 # Go: test coverage and compiled binaries
 coverage.out
